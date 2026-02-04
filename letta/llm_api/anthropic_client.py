@@ -1147,11 +1147,34 @@ class AnthropicClient(LLMClientBase):
 
         return chat_completion_response
 
+    # Marker used to separate cacheable (stable) content from non-cacheable (dynamic) content
+    CACHE_BREAK_MARKER = "<!-- CACHE_BREAK -->"
+
     def _add_cache_control_to_system_message(self, system_content):
-        """Add cache control to system message content."""
+        """Add cache control to system message content.
+        
+        If the content contains CACHE_BREAK_MARKER, splits into multiple content blocks:
+        - Content BEFORE the marker gets cache_control (stable: system prompt + memory blocks)
+        - Content AFTER the marker does NOT get cache_control (dynamic: timestamps, counts)
+        
+        This prevents dynamic metadata from invalidating the cache for stable content.
+        """
         if isinstance(system_content, str):
-            # For string content, convert to list format with cache control
-            return [{"type": "text", "text": system_content, "cache_control": {"type": "ephemeral"}}]
+            # Check for cache break marker
+            if self.CACHE_BREAK_MARKER in system_content:
+                parts = system_content.split(self.CACHE_BREAK_MARKER)
+                content_blocks = []
+                for i, part in enumerate(parts):
+                    if part.strip():  # Skip empty parts
+                        block = {"type": "text", "text": part}
+                        # Cache all parts EXCEPT the last one (which contains dynamic metadata)
+                        if i < len(parts) - 1:
+                            block["cache_control"] = {"type": "ephemeral"}
+                        content_blocks.append(block)
+                return content_blocks if content_blocks else [{"type": "text", "text": system_content}]
+            else:
+                # No marker - original behavior: wrap entire content with cache control
+                return [{"type": "text", "text": system_content, "cache_control": {"type": "ephemeral"}}]
         elif isinstance(system_content, list):
             # For list content, add cache control to the last text block
             cached_content = system_content.copy()
