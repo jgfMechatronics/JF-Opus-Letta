@@ -129,10 +129,7 @@ class PromptGenerator:
                 archive_tags=archive_tags,
             )
 
-            # CACHE_BREAK marker separates stable content (memory blocks) from dynamic content (metadata)
-            # This allows Anthropic prompt caching to cache the stable portion independently
-            # See: _add_cache_control_to_system_message() in anthropic_client.py
-            full_memory_string = memory_with_sources + "\n<!-- CACHE_BREAK -->\n" + memory_metadata_string
+            full_memory_string = memory_with_sources + "\n\n" + memory_metadata_string
 
             # Add to the variables list to inject
             variables[IN_CONTEXT_MEMORY_KEYWORD] = full_memory_string
