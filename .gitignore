@@ -1004,3 +1004,8 @@ tests/test_tool_sandbox/restaurant_management_system/venv
 
 ## custom scripts
 test
+.letta/settings.json
+.letta/settings.local.json
+.letta/skills-hash.json
+Caching improvement work/git ls-files.txt
+Caching improvement work/Plan for implementation.txt
