@@ -39,6 +39,7 @@ from letta.schemas.message import Message, MessageCreate, ToolReturn
 from letta.schemas.openai.chat_completion_response import FunctionCall, ToolCall, ToolCallDenial, UsageStatistics
 from letta.schemas.step import StepProgression
 from letta.schemas.step_metrics import StepMetrics
+from letta.system import get_token_limit_warning
 from letta.schemas.tool_execution_result import ToolExecutionResult
 from letta.schemas.usage import LettaUsageStatistics
 from letta.schemas.user import User
@@ -96,6 +97,8 @@ class LettaAgentV3(LettaAgentV2):
         self.conversation_id: str | None = None
         # Client-side tools passed in the request (executed by client, not server)
         self.client_tools: list[ClientToolSchema] = []
+        # Flag to track if we've alerted about memory pressure (resets after compaction)
+        self.agent_alerted_about_memory_pressure: bool = False
 
     def _compute_tool_return_truncation_chars(self) -> int:
         """Compute a dynamic cap for tool returns in requests.
@@ -384,6 +387,25 @@ class LettaAgentV3(LettaAgentV2):
                 # Check if step was cancelled - break out of the step loop
                 if not self.should_continue and self.stop_reason.stop_reason == StopReasonType.cancelled.value:
                     break
+
+                # Check for memory pressure and inject warning if needed
+                if (
+                    self.summarizer_settings.send_memory_warning_message
+                    and not self.agent_alerted_about_memory_pressure
+                    and not self.agent_state.message_buffer_autoclear
+                    and self.context_token_estimate is not None
+                ):
+                    warning_threshold = int(
+                        self.agent_state.llm_config.context_window * self.summarizer_settings.memory_warning_threshold
+                    )
+                    if self.context_token_estimate > warning_threshold:
+                        self.logger.info(
+                            f"Memory pressure warning triggered (current: {self.context_token_estimate}, threshold: {warning_threshold})"
+                        )
+                        warning_message = get_token_limit_warning()
+                        input_messages_to_persist = [MessageCreate(role=MessageRole.user, content=warning_message)]
+                        self.agent_alerted_about_memory_pressure = True
+                        self.should_continue = True  # Force continuation so agent sees the warning
 
                 # refresh in-context messages (TODO: remove?)
                 # in_context_messages = await self._refresh_messages(in_context_messages)
@@ -936,6 +958,8 @@ class LettaAgentV3(LettaAgentV2):
                     new_messages=[summary_message],
                     in_context_messages=messages,
                 )
+                # Reset memory pressure alert so we can warn again before next compaction
+                self.agent_alerted_about_memory_pressure = False
 
         except Exception as e:
             # NOTE: message persistence does not happen in the case of an exception (rollback to previous state)
