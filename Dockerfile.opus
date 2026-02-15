@@ -1,3 +1,4 @@
 FROM letta/letta:0.16.4
 COPY letta/llm_api/anthropic_client.py /app/letta/llm_api/anthropic_client.py
 COPY letta/interfaces/anthropic_parallel_tool_call_streaming_interface.py /app/letta/interfaces/anthropic_parallel_tool_call_streaming_interface.py
+COPY letta/agents/letta_agent_v3.py /app/letta/agents/letta_agent_v3.py

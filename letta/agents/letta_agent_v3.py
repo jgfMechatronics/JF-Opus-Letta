@@ -390,13 +390,13 @@ class LettaAgentV3(LettaAgentV2):
 
                 # Check for memory pressure and inject warning if needed
                 if (
-                    self.summarizer_settings.send_memory_warning_message
+                    summarizer_settings.send_memory_warning_message
                     and not self.agent_alerted_about_memory_pressure
                     and not self.agent_state.message_buffer_autoclear
                     and self.context_token_estimate is not None
                 ):
                     warning_threshold = int(
-                        self.agent_state.llm_config.context_window * self.summarizer_settings.memory_warning_threshold
+                        self.agent_state.llm_config.context_window * summarizer_settings.memory_warning_threshold
                     )
                     if self.context_token_estimate > warning_threshold:
                         self.logger.info(
