@@ -403,7 +403,12 @@ class LettaAgentV3(LettaAgentV2):
                             f"Memory pressure warning triggered (current: {self.context_token_estimate}, threshold: {warning_threshold})"
                         )
                         warning_message = get_token_limit_warning()
-                        input_messages_to_persist = [MessageCreate(role=MessageRole.user, content=warning_message)]
+                        # this might not be the best way to create a message
+                        input_messages_to_persist = [Message.dict_to_message(
+                            agent_id=self.agent_state.id,
+                            model=self.agent_state.llm_config.model,
+                            openai_message_dict={"role": "user", "content": warning_message},
+                        )]
                         self.agent_alerted_about_memory_pressure = True
                         self.should_continue = True  # Force continuation so agent sees the warning
 
