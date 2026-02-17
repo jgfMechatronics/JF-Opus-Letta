@@ -4,4 +4,5 @@ COPY letta/interfaces/anthropic_parallel_tool_call_streaming_interface.py /app/l
 # COPY letta/agents/letta_agent_v3.py /app/letta/agents/letta_agent_v3.py
 # COPY letta/schemas/agent.py /app/letta/schemas/agent.py
 # COPY letta/orm/agent.py /app/letta/orm/agent.py
-# COPY /alembic/versions/a1b2c3d4e5f9_add_memory_pressure_alerted_to_agents.py /app/alembic/versions/a1b2c3d4e5f9_add_memory_pressure_alerted_to_agents.py
+# COPY alembic/versions/a1b2c3d4e5f9_add_memory_pressure_alerted_to_agents.py /app/alembic/versions/a1b2c3d4e5f9_add_memory_pressure_alerted_to_agents.py
+

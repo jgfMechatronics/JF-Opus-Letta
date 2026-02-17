@@ -94,6 +94,9 @@ class Agent(SqlalchemyBase, OrganizationMixin, ProjectMixin, TemplateEntityMixin
     enable_sleeptime: Mapped[Optional[bool]] = mapped_column(
         Boolean, doc="If set to True, memory management will move to a background agent thread."
     )
+    memory_pressure_alerted: Mapped[bool] = mapped_column(
+        Boolean, default=False, doc="Flag indicating whether the agent has been alerted about memory pressure. Resets after compaction."
+    )
 
     # Run metrics
     last_run_completion: Mapped[Optional[datetime]] = mapped_column(
