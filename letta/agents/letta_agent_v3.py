@@ -27,7 +27,7 @@ from letta.helpers.message_helper import convert_message_creates_to_messages
 from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.otel.tracing import trace_method
-from letta.schemas.agent import AgentState
+from letta.schemas.agent import AgentState, UpdateAgent
 from letta.schemas.enums import MessageRole
 from letta.schemas.letta_message import ApprovalReturn, LettaErrorMessage, LettaMessage, MessageType
 from letta.schemas.letta_message_content import OmittedReasoningContent, ReasoningContent, RedactedReasoningContent, TextContent
@@ -407,7 +407,7 @@ class LettaAgentV3(LettaAgentV2):
                             model=self.agent_state.llm_config.model,
                             openai_message_dict={"role": "user", "content": warning_message},
                         )]
-                        self.agent_state.memory_pressure_alerted = True
+                        await self._set_memory_pressure_alerted(True)
                         self.should_continue = True  # Force continuation so agent sees the warning
 
                 # refresh in-context messages (TODO: remove?)
@@ -503,6 +503,15 @@ class LettaAgentV3(LettaAgentV2):
             )
             yield f"event: error\ndata: {error_message.model_dump_json()}\n\n"
             # Note: we don't send finish chunks here since we already errored
+
+    async def _set_memory_pressure_alerted(self, value: bool) -> None:
+        """Set memory pressure alert flag in-memory and persist to DB."""
+        self.agent_state.memory_pressure_alerted = value
+        await self.agent_manager.update_agent_async(
+            agent_id=self.agent_state.id,
+            agent_update=UpdateAgent(memory_pressure_alerted=value),
+            actor=self.actor,
+        )
 
     async def _check_for_system_prompt_overflow(self, system_message):
         """
@@ -962,7 +971,7 @@ class LettaAgentV3(LettaAgentV2):
                     in_context_messages=messages,
                 )
                 # Reset memory pressure alert so we can warn again before next compaction
-                self.agent_state.memory_pressure_alerted = False
+                await self._set_memory_pressure_alerted(False)
 
         except Exception as e:
             # NOTE: message persistence does not happen in the case of an exception (rollback to previous state)

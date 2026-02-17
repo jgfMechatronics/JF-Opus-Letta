@@ -443,6 +443,10 @@ class UpdateAgent(BaseModel):
         None,
         description="If set to True, the agent will not remember previous messages (though the agent will still retain state via core memory blocks and archival/recall memory). Not recommended unless you have an advanced use case.",
     )
+    memory_pressure_alerted: Optional[bool] = Field(
+        None,
+        description="Flag indicating if the user has been warned about memory pressure approaching context window limit.",
+    )
 
     # model configuration
     model: Optional[str] = Field(
