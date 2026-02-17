@@ -97,8 +97,6 @@ class LettaAgentV3(LettaAgentV2):
         self.conversation_id: str | None = None
         # Client-side tools passed in the request (executed by client, not server)
         self.client_tools: list[ClientToolSchema] = []
-        # Flag to track if we've alerted about memory pressure (resets after compaction)
-        self.agent_alerted_about_memory_pressure: bool = False
 
     def _compute_tool_return_truncation_chars(self) -> int:
         """Compute a dynamic cap for tool returns in requests.
@@ -391,7 +389,7 @@ class LettaAgentV3(LettaAgentV2):
                 # Check for memory pressure and inject warning if needed
                 if (
                     summarizer_settings.send_memory_warning_message
-                    and not self.agent_alerted_about_memory_pressure
+                    and not self.agent_state.memory_pressure_alerted
                     and not self.agent_state.message_buffer_autoclear
                     and self.context_token_estimate is not None
                 ):
@@ -409,7 +407,7 @@ class LettaAgentV3(LettaAgentV2):
                             model=self.agent_state.llm_config.model,
                             openai_message_dict={"role": "user", "content": warning_message},
                         )]
-                        self.agent_alerted_about_memory_pressure = True
+                        self.agent_state.memory_pressure_alerted = True
                         self.should_continue = True  # Force continuation so agent sees the warning
 
                 # refresh in-context messages (TODO: remove?)
@@ -964,7 +962,7 @@ class LettaAgentV3(LettaAgentV2):
                     in_context_messages=messages,
                 )
                 # Reset memory pressure alert so we can warn again before next compaction
-                self.agent_alerted_about_memory_pressure = False
+                self.agent_state.memory_pressure_alerted = False
 
         except Exception as e:
             # NOTE: message persistence does not happen in the case of an exception (rollback to previous state)

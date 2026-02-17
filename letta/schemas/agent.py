@@ -140,6 +140,10 @@ class AgentState(OrmMetadataBase, validate_assignment=True):
         None,
         description="If set to True, memory management will move to a background agent thread.",
     )
+    memory_pressure_alerted: bool = Field(
+        False,
+        description="Flag indicating whether the agent has been alerted about memory pressure in the current context window. Resets after compaction.",
+    )
 
     multi_agent_group: Optional[Group] = Field(
         None, description="Deprecated: Use `managed_group` field instead. The multi-agent group that this agent manages.", deprecated=True
