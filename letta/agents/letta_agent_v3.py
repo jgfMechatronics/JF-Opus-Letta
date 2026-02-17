@@ -971,6 +971,9 @@ class LettaAgentV3(LettaAgentV2):
                     in_context_messages=messages,
                 )
                 # Reset memory pressure alert so we can warn again before next compaction
+                # TODO: User-triggered compaction or message clearing may bypass this reset,
+                # leaving flag=True and suppressing the next alert cycle. Audit all
+                # compaction/clear paths to ensure flag resets appropriately.
                 await self._set_memory_pressure_alerted(False)
 
         except Exception as e:
