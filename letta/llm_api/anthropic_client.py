@@ -516,6 +516,10 @@ class AnthropicClient(LLMClientBase):
         if llm_config.model.startswith("claude-opus-4-5") and llm_config.effort is not None:
             data["output_config"] = {"effort": llm_config.effort}
 
+        # TEMPORARY TEST: hardcode effort=low for Sonnet 4.6 (no beta needed, GA feature)
+        if llm_config.model.startswith("claude-sonnet-4-6"):
+            data["output_config"] = {"effort": "max"}
+
         # Context management for Opus 4.5 to preserve thinking blocks and improve cache hits
         # See: https://docs.anthropic.com/en/docs/build-with-claude/context-editing
         if llm_config.model.startswith("claude-opus-4-5") and llm_config.enable_reasoner:
