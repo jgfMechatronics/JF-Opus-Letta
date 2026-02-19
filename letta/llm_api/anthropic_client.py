@@ -125,6 +125,23 @@ class AnthropicClient(LLMClientBase):
         if llm_config.strict and _supports_structured_outputs(llm_config.model):
             betas.append("structured-outputs-2025-11-13")
 
+        # RAW CONTEXT DUMP - temporary debugging for reasoning_effort investigation
+        system_field = request_data.get("system", "")
+        if isinstance(system_field, list) and len(system_field) > 0:
+            system_text_preview = system_field[0].get("text", "")[:500]
+        elif isinstance(system_field, str):
+            system_text_preview = system_field[:500]
+        else:
+            system_text_preview = repr(system_field)[:500]
+        logger.warning(
+            "[RAW CONTEXT DUMP] model=%s | thinking=%s | output_config=%s | betas=%s | system_start=%r",
+            request_data.get("model"),
+            request_data.get("thinking"),
+            request_data.get("output_config"),
+            betas,
+            system_text_preview,
+        )
+
         try:
             if betas:
                 response = await client.beta.messages.create(**request_data, betas=betas)
@@ -289,6 +306,23 @@ class AnthropicClient(LLMClientBase):
         # Structured outputs beta - only when strict is enabled and model supports it
         if llm_config.strict and _supports_structured_outputs(llm_config.model):
             betas.append("structured-outputs-2025-11-13")
+
+        # RAW CONTEXT DUMP - temporary debugging for reasoning_effort investigation
+        system_field = request_data.get("system", "")
+        if isinstance(system_field, list) and len(system_field) > 0:
+            system_text_preview = system_field[0].get("text", "")[:500]
+        elif isinstance(system_field, str):
+            system_text_preview = system_field[:500]
+        else:
+            system_text_preview = repr(system_field)[:500]
+        logger.warning(
+            "[RAW CONTEXT DUMP] model=%s | thinking=%s | output_config=%s | betas=%s | system_start=%r",
+            request_data.get("model"),
+            request_data.get("thinking"),
+            request_data.get("output_config"),
+            betas,
+            system_text_preview,
+        )
 
         # log failed requests
         try:
