@@ -70,3 +70,4 @@ Then added `and not step_has_pending_call` to the injection condition.
 - Confirmed that alerts do not fire super super prematurely even when chaining tool calls
 - The guard does block against firing between tool calls, but it does so by not firing during a tool call chain AT ALL which is too conservative.
   Unclear why this is happening
+- Interestingly, the alert still correctly interrupts tool call chains in the ADE. But that already worked correctly in the ADE.
