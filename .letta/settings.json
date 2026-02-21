@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir /b letta)"
+      "Bash(dir /b letta)",
+      "Bash(git log:*)",
+      "Bash(git -C:*)",
+      "Edit(Agent Notes To Self/**)",
+      "Edit(C:/Users/gossf/.letta/plans/**)"
     ]
   }
 }
