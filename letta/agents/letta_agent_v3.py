@@ -386,36 +386,6 @@ class LettaAgentV3(LettaAgentV2):
                 if not self.should_continue and self.stop_reason.stop_reason == StopReasonType.cancelled.value:
                     break
 
-                # Check for memory pressure and inject warning if needed
-                # Guard: don't inject if step ended with pending tool call or approval (would orphan the call)
-                step_has_pending_call = (
-                    response_letta_messages
-                    and getattr(response_letta_messages[-1], 'message_type', None) in ('tool_call_message', 'approval_request_message')
-                )
-                if (
-                    summarizer_settings.send_memory_warning_message
-                    and not self.agent_state.memory_pressure_alerted
-                    and not self.agent_state.message_buffer_autoclear
-                    and not step_has_pending_call
-                    and self.context_token_estimate is not None
-                ):
-                    warning_threshold = int(
-                        self.agent_state.llm_config.context_window * summarizer_settings.memory_warning_threshold
-                    )
-                    if self.context_token_estimate > warning_threshold:
-                        self.logger.info(
-                            f"Memory pressure warning triggered (current: {self.context_token_estimate}, threshold: {warning_threshold})"
-                        )
-                        warning_message = get_token_limit_warning()
-                        # this might not be the best way to create a message
-                        input_messages_to_persist = [Message.dict_to_message(
-                            agent_id=self.agent_state.id,
-                            model=self.agent_state.llm_config.model,
-                            openai_message_dict={"role": "user", "content": warning_message},
-                        )]
-                        await self._set_memory_pressure_alerted(True)
-                        self.should_continue = True  # Force continuation so agent sees the warning
-
                 # refresh in-context messages (TODO: remove?)
                 # in_context_messages = await self._refresh_messages(in_context_messages)
 
@@ -917,6 +887,49 @@ class LettaAgentV3(LettaAgentV2):
             # extend trackers with new messages
             self.response_messages.extend(new_messages)
             messages.extend(new_messages)
+
+            # === Memory pressure warning injection ===
+            # Check if we should inject a warning before checkpointing
+            # Guard: don't inject if step ends with pending approval/pending client side tool (would orphan tool call)
+            last_msg_role = new_messages[-1].role if new_messages else None
+            is_pending_approval = last_msg_role == MessageRole.approval
+            self.logger.info(f"\n***********************\nMemory Pressure Check. Msg Role: {last_msg_role}, Is Pending approval: {is_pending_approval}\n")
+            if (
+                summarizer_settings.send_memory_warning_message
+                and not self.agent_state.memory_pressure_alerted
+                and not self.agent_state.message_buffer_autoclear
+                and not is_pending_approval
+            ):
+                self.logger.info(f"\nMemory Pressure Guard passed\n")
+                # Get token estimate: use LLM-reported if available, else compute locally
+                if self.context_token_estimate is not None:
+                    current_tokens = self.context_token_estimate
+                else:
+                    # No LLM call this iteration (e.g., processing tool_returns from client)
+                    # Use local token count on current messages
+                    current_tokens = await count_tokens(self.actor, self.agent_state.llm_config, messages)
+
+                warning_threshold = int(
+                    self.agent_state.llm_config.context_window * summarizer_settings.memory_warning_threshold
+                )
+                self.logger.info(f"Memory Pressure Warning token est: f{current_tokens}")
+                if current_tokens > warning_threshold:
+                    self.logger.info(
+                        f"Memory pressure warning triggered (current: {current_tokens}, threshold: {warning_threshold})"
+                    )
+                    warning_message = Message.dict_to_message(
+                        agent_id=self.agent_state.id,
+                        model=self.agent_state.llm_config.model,
+                        openai_message_dict={"role": "user", "content": get_token_limit_warning()},
+                    )
+                    # Add to tracking lists so it gets persisted and sent to LLM
+                    messages.append(warning_message)
+                    new_messages.append(warning_message)
+                    self.response_messages.append(warning_message)
+
+                    await self._set_memory_pressure_alerted(True)
+                    self.should_continue = True  # Force continuation so agent sees the warning
+                # === END memory pressure warning ===
 
             # step(...) has successfully completed! now we can persist messages and update the in-context messages + save metrics
             # persistence needs to happen before streaming to minimize chances of agent getting into an inconsistent state
