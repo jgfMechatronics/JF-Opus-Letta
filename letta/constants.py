@@ -402,9 +402,11 @@ LLM_MAX_CONTEXT_WINDOW = {
 #         # "Remember to pass request_heartbeat = true if you would like to send a message immediately after.",
 #     ]
 # )
-MESSAGE_SUMMARY_WARNING_STR = [f"System Message: You are nearing compaction.\n"
-                               "Please sweep your active context and look for anything that should be moved to an appropriate core memory block\n"
-                               "You do not need to re-record anything you previously recorded in your active context, or anything already captured in core memory"]
+MESSAGE_SUMMARY_WARNING_STR = ("System Message: You are nearing compaction. Some of the messages at the beginning of your context will soon be evicted.\n"
+                               "Please sweep your active context and look for anything that should be moved to an appropriate core memory block.\n"
+                               "You do NOT need to re-save anything you have already saved in this context, or anything already captured in core memory.\n"
+                               "Remember, anything compacted away and not archived or saved to core-memory will be GONE, as if it never happened from your perspective!\n"
+                               "If your memory is already up to date with your active context, you can ignore this message.")
 
 
 # Throw an error message when a read-only block is edited
