@@ -48,6 +48,102 @@ Warns me when context is approaching compaction threshold by injecting a message
 5. Edge case: message clearing
 6. Verify warning doesn't fire if already alerted
 
+---
+
+## Letta Code (Client Tool) Problem — Feb 21, 2026
+
+### The Problem
+Warning works in ADE but fails silently during Letta Code tool chains.
+
+### Root Cause
+Each client tool execution creates a **new HTTP request** → **new agent instance** → `context_token_estimate` lost.
+
+### Code Path Walkthrough
+
+**Stream 1 (initial request):**
+1. `streaming_service.py:138` — `AgentLoop.load()` creates fresh `LettaAgentV3`
+2. `letta_agent_v3.py:94` — Instance has `self.context_token_estimate = None`
+3. `_step()` runs, makes LLM call
+4. `letta_agent_v3.py:872` — Estimate populated: `self.context_token_estimate = llm_adapter.usage.total_tokens`
+5. Client tool detected (`letta_agent_v3.py:1147-1174`)
+6. Creates `approval_request_message`, returns `(messages, False, requires_approval)`
+7. Warning check runs (`letta_agent_v3.py:389-400`) but **guard blocks** — last message is `approval_request_message`
+8. `break` exits loop, generator completes, HTTP response finishes
+9. **Instance dies, estimate lost**
+
+**Client executes tool locally (Bash, Read, etc)**
+
+**Stream 2 (approval_response):**
+1. NEW HTTP request → `AgentLoop.load()` → **fresh instance**
+2. `context_token_estimate = None` (fresh instance)
+3. `_maybe_get_approval_messages()` detects continuation (`letta_agent_v3.py:675`)
+4. Warning check at line 400: `self.context_token_estimate is not None` → **False**
+5. Check short-circuits, no warning
+6. `_step()` runs, estimate gets populated...
+7. If another client tool → cycle repeats
+
+### Why Native Tools Work
+Native tools execute within the **same** `stream()` call, same instance. Estimate persists across step loop iterations. End-of-step check sees the estimate.
+
+### Key Files
+- `letta/agents/letta_agent_v3.py` — lines 345-420 (stream + step loop), line 872 (estimate set), line 400 (check fails)
+- `letta/agents/agent_loop.py:19` — `AgentLoop.load()` factory (no caching)
+- `letta/services/streaming_service.py:138` — creates fresh agent per request
+
+### Potential Solutions
+
+**Option A: count_tokens() at stream start (for approval_response only)**
+- After preparing `in_context_messages`, before step loop
+- Only when `approval_response is not None` (client tool continuation)
+- Call `count_tokens(actor, llm_config, in_context_messages)` locally
+- Check threshold, inject warning if needed
+- Pro: No DB changes, single file edit
+- Con: Extra tokenization call, slightly less accurate than API response
+
+**Option B: Persist estimate to DB**
+- Add `last_context_token_estimate: int | None` to AgentState
+- Store at step end, check at stream start
+- Pro: Uses API-reported count (more accurate)
+- Con: Schema change, migration, more files
+
+### Status
+Investigating. Key insight discovered (see below).
+
+---
+
+## Deeper Insight: Injection Point Problem (Feb 21, 2026)
+
+### The Real Problem
+Even if we persist/compute the estimate, **where do we inject the warning?**
+
+In a client tool chain, we're always in one of two states:
+1. **About to append tool_result** — can't inject before it (breaks API contract)
+2. **Just got LLM response that's another client tool** — can't inject after it (orphans the call)
+
+There's no valid injection point in the normal flow.
+
+### Potential Solution
+Inject warning AFTER tool_result but BEFORE LLM call:
+```
+assistant: [tool_call]
+tool: [tool_result]
+user: [WARNING]  ← inject here
+[LLM call]
+```
+
+This would cause LLM to do memory sweep instead of continuing tool chain.
+
+### Key Question
+Where exactly does tool_result get appended to the message list? Need to find this to know if we can inject after it.
+
+### Flow Reminder (approval_response case)
+1. Stream starts, `in_context_messages` prepared (includes original tool_call)
+2. `_step()` iteration 1: processes tool_returns, no LLM call, returns continue=True
+3. `_step()` iteration 2: makes LLM call with tool_result appended
+4. If LLM returns client tool → guard blocks → break
+
+The tool_result must get appended somewhere between iteration 1 and the LLM call in iteration 2.
+
 ### Git Commits (chronological)
 - `bd9048968` - Prototype (instance-level flag only)
 - `2d03d2771` - Bug fix for non-existent member access
@@ -57,4 +153,4 @@ Warns me when context is approaching compaction threshold by injecting a message
 - `a1f4bcca8` - THE FIX: to_pydantic mappings added, it works
 
 ---
-*Last updated: Feb 20, 2026*
+*Last updated: Feb 21, 2026*
