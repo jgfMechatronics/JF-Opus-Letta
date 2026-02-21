@@ -387,10 +387,16 @@ class LettaAgentV3(LettaAgentV2):
                     break
 
                 # Check for memory pressure and inject warning if needed
+                # Guard: don't inject if step ended with pending tool call or approval (would orphan the call)
+                step_has_pending_call = (
+                    response_letta_messages
+                    and getattr(response_letta_messages[-1], 'message_type', None) in ('tool_call_message', 'approval_request_message')
+                )
                 if (
                     summarizer_settings.send_memory_warning_message
                     and not self.agent_state.memory_pressure_alerted
                     and not self.agent_state.message_buffer_autoclear
+                    and not step_has_pending_call
                     and self.context_token_estimate is not None
                 ):
                     warning_threshold = int(

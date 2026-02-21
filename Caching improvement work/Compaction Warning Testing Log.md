@@ -35,3 +35,38 @@
 
 *Test container: Sonnet (Dockerfile.sonnet)*
 *Branch: opus/prompt-cache-optimization*
+
+---
+
+## Feb 21, 2026 — Guard Fix for Tool Call Orphaning
+
+### Problem Identified (Feb 20)
+Warning injection breaks Anthropic's tool_use/tool_result pairing in Letta Code:
+- We inject a user message when the API expects a tool_result
+- Error: `'tool_use' ids were found without 'tool_result' blocks immediately after`
+- Also observed: alert firing with way too much headroom (token inflation bug — separate issue, reported to Letta)
+
+### Fix Implemented
+Added guard condition in `letta/agents/letta_agent_v3.py` (~line 390):
+```python
+# Guard: don't inject if step ended with pending tool call or approval (would orphan the call)
+step_has_pending_call = (
+    response_letta_messages
+    and getattr(response_letta_messages[-1], 'message_type', None) in ('tool_call_message', 'approval_request_message')
+)
+```
+Then added `and not step_has_pending_call` to the injection condition.
+
+### Logic
+- Check if the last message from this step is `tool_call_message` or `approval_request_message`
+- If so, skip injection — we're mid-chain and would orphan the pending call
+- Warning will fire on next step that ends with text (no pending calls)
+
+### Testing (in progress)
+- [ ] Trigger warning mid-tool-chain in LC — verify no orphan error
+- [ ] Verify warning still fires between tool chains or on text-only responses
+- [ ] Qualitative: does deferred warning still feel useful?
+### Test notes
+- Confirmed that alerts do not fire super super prematurely even when chaining tool calls
+- The guard does block against firing between tool calls, but it does so by not firing during a tool call chain AT ALL which is too conservative.
+  Unclear why this is happening
