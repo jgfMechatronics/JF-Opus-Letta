@@ -71,3 +71,4 @@ Then added `and not step_has_pending_call` to the injection condition.
 - The guard does block against firing between tool calls, but it does so by not firing during a tool call chain AT ALL which is too conservative.
   Unclear why this is happening
 - Interestingly, the alert still correctly interrupts tool call chains in the ADE. But that already worked correctly in the ADE.
+- Of further interest, the mid chaining interruption on non LC native tools still works in LC, like doing archival memory reads. It just can't interrupt LC     specific tools like read()
