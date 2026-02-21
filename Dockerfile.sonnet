@@ -6,4 +6,5 @@ COPY letta/schemas/agent.py /app/letta/schemas/agent.py
 COPY letta/services/agent_manager.py /app/letta/services/agent_manager.py
 COPY letta/orm/agent.py /app/letta/orm/agent.py
 COPY alembic/versions/a1b2c3d4e5f9_add_memory_pressure_alerted_to_agents.py /app/alembic/versions/a1b2c3d4e5f9_add_memory_pressure_alerted_to_agents.py
+COPY letta/constants.py /app/letta/constants.py
 
