@@ -775,6 +775,7 @@ class AgentManager:
                 "base_template_id": agent_update.base_template_id,
                 "message_buffer_autoclear": agent_update.message_buffer_autoclear,
                 "memory_pressure_alerted": agent_update.memory_pressure_alerted,
+                "context_token_estimate": agent_update.context_token_estimate,
                 "enable_sleeptime": agent_update.enable_sleeptime,
                 "response_format": agent_update.response_format,
                 "last_run_completion": agent_update.last_run_completion,

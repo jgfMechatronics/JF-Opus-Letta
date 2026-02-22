@@ -489,6 +489,15 @@ class LettaAgentV3(LettaAgentV2):
             actor=self.actor,
         )
 
+    async def _set_context_token_estimate(self, value: int) -> None:
+        """Persist LLM-reported token estimate to DB for cross-request continuity."""
+        self.agent_state.context_token_estimate = value
+        await self.agent_manager.update_agent_async(
+            agent_id=self.agent_state.id,
+            agent_update=UpdateAgent(context_token_estimate=value),
+            actor=self.actor,
+        )
+
     async def _check_for_system_prompt_overflow(self, system_message):
         """
         Since the system prompt cannot be compacted, we need to check to see if it is the cause of the context overflow
@@ -840,6 +849,7 @@ class LettaAgentV3(LettaAgentV2):
                 # update metrics
                 self._update_global_usage_stats(llm_adapter.usage)
                 self.context_token_estimate = llm_adapter.usage.total_tokens
+                await self._set_context_token_estimate(self.context_token_estimate)
                 self.logger.info(f"Context token estimate after LLM request: {self.context_token_estimate}")
 
                 # Handle the AI response with the extracted data (supports multiple tool calls)
@@ -901,12 +911,16 @@ class LettaAgentV3(LettaAgentV2):
                 and not is_pending_approval
             ):
                 self.logger.info(f"\nMemory Pressure Guard passed\n")
-                # Get token estimate: use LLM-reported if available, else compute locally
+                # Get token estimate: prefer LLM-reported, then persisted, then compute
                 if self.context_token_estimate is not None:
+                    # Just got estimate from LLM this request
                     current_tokens = self.context_token_estimate
+                elif self.agent_state.context_token_estimate is not None:
+                    # No LLM call this request, but have persisted estimate from previous request
+                    # This preserves the LLM-reported estimate across HTTP boundaries
+                    current_tokens = self.agent_state.context_token_estimate
                 else:
-                    # No LLM call this iteration (e.g., processing tool_returns from client)
-                    # Use local token count on current messages
+                    # No estimate available, compute locally (fallback)
                     current_tokens = await count_tokens(self.actor, self.agent_state.llm_config, messages)
 
                 warning_threshold = int(

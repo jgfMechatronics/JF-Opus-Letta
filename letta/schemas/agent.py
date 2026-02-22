@@ -144,6 +144,10 @@ class AgentState(OrmMetadataBase, validate_assignment=True):
         False,
         description="Flag indicating whether the agent has been alerted about memory pressure in the current context window. Resets after compaction.",
     )
+    context_token_estimate: Optional[int] = Field(
+        None,
+        description="Last known context token estimate from LLM API (persisted across HTTP requests).",
+    )
 
     multi_agent_group: Optional[Group] = Field(
         None, description="Deprecated: Use `managed_group` field instead. The multi-agent group that this agent manages.", deprecated=True
@@ -446,6 +450,10 @@ class UpdateAgent(BaseModel):
     memory_pressure_alerted: Optional[bool] = Field(
         None,
         description="Flag indicating if the user has been warned about memory pressure approaching context window limit.",
+    )
+    context_token_estimate: Optional[int] = Field(
+        None,
+        description="Last known context token estimate from LLM API (persisted across HTTP requests).",
     )
 
     # model configuration

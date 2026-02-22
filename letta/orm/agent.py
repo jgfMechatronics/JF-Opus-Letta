@@ -97,6 +97,9 @@ class Agent(SqlalchemyBase, OrganizationMixin, ProjectMixin, TemplateEntityMixin
     memory_pressure_alerted: Mapped[bool] = mapped_column(
         Boolean, default=False, doc="Flag indicating whether the agent has been alerted about memory pressure. Resets after compaction."
     )
+    context_token_estimate: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, doc="Last known context token estimate from LLM API (persisted across HTTP requests)."
+    )
 
     # Run metrics
     last_run_completion: Mapped[Optional[datetime]] = mapped_column(
@@ -250,6 +253,7 @@ class Agent(SqlalchemyBase, OrganizationMixin, ProjectMixin, TemplateEntityMixin
             "tool_rules": self.tool_rules,
             "message_buffer_autoclear": self.message_buffer_autoclear,
             "memory_pressure_alerted": self.memory_pressure_alerted or False,
+            "context_token_estimate": self.context_token_estimate,
             "created_by_id": self.created_by_id,
             "last_updated_by_id": self.last_updated_by_id,
             "created_at": self.created_at,
@@ -381,6 +385,7 @@ class Agent(SqlalchemyBase, OrganizationMixin, ProjectMixin, TemplateEntityMixin
             "tool_rules": self.tool_rules,
             "message_buffer_autoclear": self.message_buffer_autoclear,
             "memory_pressure_alerted": self.memory_pressure_alerted or False,
+            "context_token_estimate": self.context_token_estimate,
             "created_by_id": self.created_by_id,
             "last_updated_by_id": self.last_updated_by_id,
             "created_at": self.created_at,

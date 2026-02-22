@@ -6,7 +6,9 @@
       "Bash(git -C:*)",
       "Edit(Agent Notes To Self/**)",
       "Edit(C:/Users/gossf/.letta/plans/**)",
-      "Bash(git diff:*)"
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(dir C:/Git/LettaSource/letta/alembic/versions | Select-Object -First 20)"
     ]
   }
 }
