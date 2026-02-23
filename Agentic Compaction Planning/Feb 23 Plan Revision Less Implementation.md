@@ -145,193 +145,56 @@ LettaAgent._handle_ai_response()
 **Core Tool (3 files — same as before):**
 
 #### File 1: `letta/functions/function_sets/base.py`
-**Purpose:** Schema stub — docstring becomes LLM-visible tool description
+**Purpose:** Schema stub — the function signature + docstring become the LLM-visible tool description. Body is just `raise NotImplementedError`.
 
-```python
-def evict_messages_and_recompile(
-    agent_state: "AgentState",
-    summary: str,
-) -> Optional[str]:
-    """
-    Evict old conversation messages to free context space. Call this when you receive
-    a memory pressure warning and have finished writing your handoff summary.
-    
-    The eviction cutoff is determined by the system at warning time (not by you). The warning
-    message tells you exactly which messages will be evicted — do your memory sweep for that
-    range, then call this tool.
-    
-    WORKFLOW:
-    1. Receive memory pressure warning (includes eviction preview)
-    2. Write comprehensive context to your rollover/persistent-working blocks
-    3. Call this tool with your handoff summary
-    4. After eviction, you'll have fresh context with your summary preserved
-    
-    Args:
-        summary: Comprehensive handoff summary. Written to 'rollover' block before eviction.
-                 Must be non-empty. This is your continuity across the context clear.
-    
-    Returns:
-        Confirmation of eviction with message counts.
-    
-    Note: If you haven't made any memory tool calls since the warning, you'll be asked to
-    confirm before eviction proceeds (to prevent accidental data loss).
-    """
-    raise NotImplementedError("Core tool — implemented in LettaCoreToolExecutor")
-```
+**Signature:** `evict_messages_and_recompile(agent_state, summary: str, skip_sanity_check: str = "") -> Optional[str]`
+
+**Docstring should convey:**
+- Call this after receiving a memory pressure warning and finishing your memory sweep
+- The eviction cutoff is determined by the system at warning time (not the agent) — the warning tells you exactly which messages will go
+- `summary`: non-empty handoff text, written to the `rollover` block before eviction; this is the agent's continuity anchor
+- `skip_sanity_check`: pass `"sweep complete"` to bypass the sanity check if you've already saved everything; any other value (including empty string) triggers the check
+- Returns confirmation with message counts, or a warning to save context first if no memory writes detected
 
 #### File 2: `letta/constants.py`
 **Purpose:** Register tool name for auto-seeding
 
-```python
-# Add to BASE_MEMORY_TOOLS (controls ToolType assignment → LETTA_MEMORY_CORE):
-BASE_MEMORY_TOOLS = [
-    "core_memory_append", 
-    "core_memory_replace", 
-    "memory", 
-    "memory_apply_patch",
-    "evict_messages_and_recompile",  # <-- ADD HERE
-]
-
-# ALSO add to LETTA_TOOL_SET (controls auto-seeding eligibility — SEPARATE from BASE_MEMORY_TOOLS):
-# In upsert_base_tools_async, the check `if name not in LETTA_TOOL_SET: continue` runs BEFORE
-# the BASE_MEMORY_TOOLS check. Must be in BOTH or tool will NOT be seeded.
-LETTA_TOOL_SET = {
-    # ... existing entries ...
-    "evict_messages_and_recompile",  # <-- ADD HERE TOO
-}
-```
+Add `"evict_messages_and_recompile"` to **both** `BASE_MEMORY_TOOLS` (assigns `ToolType.LETTA_MEMORY_CORE`) and `LETTA_TOOL_SET` (gates auto-seeding eligibility). Both are required — `upsert_base_tools_async` checks `LETTA_TOOL_SET` first and skips anything not in it, before ever reaching the `BASE_MEMORY_TOOLS` check.
 
 #### File 3: `letta/services/tool_executor/core_tool_executor.py`
-**Purpose:** Actual implementation (NOTE: explored during session — confirmed this is the correct path, NOT `letta/agents/`)
+**Purpose:** Actual implementation. Confirmed correct path — NOT `letta/agents/`.
 
-**Add to function_map in `execute()` method:**
-```python
-function_map = {
-    # ... existing entries ...
-    "evict_messages_and_recompile": self.evict_messages_and_recompile,
-}
-```
+**Two changes:**
 
-**Add method to class:**
-```python
-async def evict_messages_and_recompile(
-    self,
-    agent_state: AgentState,
-    actor: User,
-    summary: str,
-    confirmed: bool = False,
-) -> str:
-    """Evict old messages and recompile context. Cutoff determined at warning time."""
-    # Imports needed at top of file:
-    # from letta.schemas.enums import MessageRole
-    # from letta.schemas.agent import UpdateAgent
-    
-    # Safety: require non-empty summary
-    if not summary or not summary.strip():
-        return "Error: summary must be non-empty. Write your handoff summary before evicting."
-    
-    # Sanity check: verify agent made memory tool calls since warning
-    # Scan assistant messages for tool_calls with names in BASE_MEMORY_TOOLS
-    # msg.tool_calls is Optional[List[OpenAIToolCall]], tc.function.name is the tool name
-    if not confirmed:
-        from letta.constants import BASE_MEMORY_TOOLS
-        recent_messages = await self.message_manager.list_messages(
-            agent_id=agent_state.id, actor=actor, ascending=False, limit=20
-        )
-        found_memory_write = any(
-            tc.function.name in BASE_MEMORY_TOOLS
-            for msg in recent_messages
-            if msg.role == MessageRole.assistant and msg.tool_calls
-            for tc in msg.tool_calls
-        )
-        if not found_memory_write:
-            return (
-                "Warning: No memory tool calls detected since the compaction warning. "
-                "Are you sure you've saved everything important? "
-                "Call again with confirmed=True to proceed anyway, or save your context first."
-            )
-    
-    # 1. Write summary to rollover block (create if missing)
-    rollover_label = "rollover"
-    try:
-        agent_state.memory.get_block(rollover_label)
-        agent_state.memory.update_block_value(label=rollover_label, value=summary)
-    except KeyError:
-        from letta.schemas.block import Block
-        new_block = Block(
-            label=rollover_label,
-            value=summary,
-            limit=10000,
-            description="Handoff summary from most recent compaction cycle."
-        )
-        persisted = await self.block_manager.create_or_update_block_async(new_block, actor)
-        await self.agent_manager.attach_block_async(
-            agent_id=agent_state.id, block_id=persisted.id, actor=actor
-        )
-        agent_state.memory.set_block(persisted)
-    
-    await self.agent_manager.update_memory_if_changed_async(
-        agent_id=agent_state.id, new_memory=agent_state.memory, actor=actor
-    )
-    
-    # 2. Get eviction cutoff (fixed at warning time)
-    # The cutoff_message_id was stored when the warning fired — retrieve it
-    # (Implementation note: need to add eviction_cutoff_message_id field to AgentState,
-    #  set by the warning system when it fires)
-    cutoff_message_id = agent_state.eviction_cutoff_message_id  # TODO: Add this field
-    
-    # 3. Get all in-context messages
-    # NOTE: method is `list_messages` (not `list_messages_async`) — async despite no suffix
-    # Pass limit=None to override the default limit=50 and get ALL messages
-    all_messages = await self.message_manager.list_messages(
-        agent_id=agent_state.id, actor=actor, ascending=True, limit=None
-    )
-    
-    if not all_messages:
-        return "Error: No messages found in context. Nothing to evict."
-    
-    # 4. Identify messages to keep: system message + everything AFTER cutoff
-    # Find cutoff index
-    cutoff_idx = next(
-        (i for i, m in enumerate(all_messages) if m.id == cutoff_message_id),
-        len(all_messages)  # fallback: keep all if cutoff not found
-    )
-    
-    # Keep: system message (idx 0) + messages from cutoff onwards
-    keep_ids = list(dict.fromkeys(
-        [all_messages[0].id] + [m.id for m in all_messages[cutoff_idx:]]
-    ))
-    
-    # 5. SOFT DELETE — trim from context window only
-    await self.agent_manager.update_message_ids_async(
-        agent_id=agent_state.id, message_ids=keep_ids, actor=actor
-    )
-    deleted = len(all_messages) - len(keep_ids)
-    
-    # 6. Rebuild system prompt
-    await self.agent_manager.rebuild_system_prompt_async(
-        agent_id=agent_state.id, actor=actor, force=True
-    )
-    
-    # 7. Reset memory pressure flag AND clear eviction cutoff
-    from letta.schemas.agent import UpdateAgent
-    await self.agent_manager.update_agent_async(
-        agent_id=agent_state.id,
-        update_agent=UpdateAgent(
-            memory_pressure_alerted=False,
-            eviction_cutoff_message_id=None,  # Clear after use
-        ),
-        actor=actor
-    )
-    
-    return (
-        f"Eviction complete. Trimmed {deleted} messages from context "
-        f"(kept {len(keep_ids)} of {len(all_messages)}). "
-        f"Messages remain in recall memory and are searchable. "
-        f"Rollover summary written to '{rollover_label}' block. "
-        f"System prompt recompiled."
-    )
-```
+**1. Add to `function_map` in `execute()`:** `"evict_messages_and_recompile": self.evict_messages_and_recompile`
+
+**2. New method:** `async def evict_messages_and_recompile(self, agent_state, actor, summary, skip_sanity_check="") -> str`
+
+Needs `MessageRole` from `letta.schemas.enums` and `UpdateAgent` from `letta.schemas.agent` imported at top of file.
+
+**Steps in order:**
+
+1. **Guard: non-empty summary** — return an error string if `summary` is blank or whitespace-only.
+
+2. **Sanity check (skip if `skip_sanity_check.strip().lower() == "sweep complete"`)** — fetch the 20 most recent messages (descending). Check whether any assistant message has a tool call whose name is in `BASE_MEMORY_TOOLS`. If none found, return a warning telling the agent to save context first, or call again with `skip_sanity_check="sweep complete"` to skip. The agent does NOT need to re-enter the summary. Using a string forces conscious acknowledgment — avoids the bool footgun of reflexively passing `True`.
+
+3. **Write summary to rollover block** — try `memory.get_block("rollover")` and update its value. If `KeyError` (block doesn't exist yet), create a new `Block` with `label="rollover"`, persist via `block_manager.create_or_update_block_async`, attach via `agent_manager.attach_block_async`, and add to local `agent_state.memory`. Then call `agent_manager.update_memory_if_changed_async` to persist.
+
+4. **Get stored cutoff** — read `agent_state.eviction_cutoff_message_id` (set by the warning system when the alert fired).
+
+5. **Fetch all in-context messages** — `message_manager.list_messages(agent_id, actor, ascending=True, limit=None)`. Guard: return error if list is empty.
+
+6. **Find cutoff index** — linear search for the message matching `eviction_cutoff_message_id`. Fallback to `len(all_messages)` (keep all) if not found — edge case where message was already deleted.
+
+7. **Build keep list** — system message (index 0) + all messages from cutoff index onwards. Use `dict.fromkeys()` to deduplicate in case cutoff happens to be at index 0.
+
+8. **Soft delete** — `agent_manager.update_message_ids_async(agent_id, keep_ids, actor)`. Trims from context window; messages stay in DB and remain searchable.
+
+9. **Rebuild system prompt** — `agent_manager.rebuild_system_prompt_async(agent_id, actor, force=True)`.
+
+10. **Reset flags** — `agent_manager.update_agent_async` with `memory_pressure_alerted=False` and `eviction_cutoff_message_id=None`.
+
+11. **Return success string** — include deleted count, kept count, total count, and note that messages remain in recall memory.
 
 **Additional Files (Feb 23 — new infrastructure):**
 
@@ -372,89 +235,25 @@ scalar_updates = {
 Two-part change:
 
 **7a. New helper in `letta/services/summarizer/summarizer_sliding_window.py`**  
-Extract the cutoff-finding logic (already in `summarize_via_sliding_window`) into a reusable function:
+Extract the cutoff-finding logic that already exists in `summarize_via_sliding_window` into a standalone reusable function:
 
-```python
-async def find_eviction_cutoff(
-    actor: User,
-    llm_config: LLMConfig,
-    in_context_messages: List[Message],
-    target_pct: float = 0.20,
-) -> tuple[int, str]:
-    """
-    Find the eviction cutoff index using percentage-based token counting.
-    Uses the same sliding-window algorithm as summarize_via_sliding_window.
-    
-    Returns:
-        (cutoff_idx, preview_str) where:
-        - cutoff_idx: first message index to KEEP (messages[cutoff_idx:] are kept)
-        - preview_str: short excerpt of last message to be evicted (for warning display)
-    """
-    system_prompt = in_context_messages[0]
-    eviction_pct = 1.0 - target_pct  # start here, walk down if needed
-    context_window = llm_config.context_window
-    cutoff_idx = None
+`async def find_eviction_cutoff(actor, llm_config, in_context_messages, target_pct=0.20) -> tuple[int, str]`
 
-    # Reuse same loop as summarize_via_sliding_window:
-    # walk from eviction_pct inward, snap to nearest assistant message
-    for pct in [i / 10 for i in range(round(eviction_pct * 10), 1, -1)]:
-        candidate = round(pct * len(in_context_messages))
-        assistant_idx = next(
-            (i for i in range(candidate, 0, -1)
-             if in_context_messages[i].role == MessageRole.assistant),
-            None
-        )
-        if assistant_idx is None:
-            continue
-        kept = [system_prompt] + in_context_messages[assistant_idx:]
-        if await count_tokens(actor, llm_config, kept) <= target_pct * context_window:
-            cutoff_idx = assistant_idx
-            break
+- Uses the same iterative algorithm already in `summarize_via_sliding_window`: walk from `(1.0 - target_pct)` of the message list inward in 10% steps, snap each candidate to the nearest preceding assistant message boundary, call `count_tokens` on the kept slice, stop when it fits within `target_pct * context_window` tokens
+- Returns `(cutoff_idx, preview_str)` where `cutoff_idx` is the first index to KEEP (everything before it gets evicted)
+- `preview_str` is a short text excerpt (≤80 chars) of the last message being evicted, for display in the warning message; falls back to `[role message]` if no text content
+- Raises `ValueError` if no valid cutoff found (pathological case)
 
-    if cutoff_idx is None:
-        raise ValueError("Could not find eviction cutoff — context may be too large")
+Also add a small private `_extract_preview(msg, max_chars=80) -> str` helper used by the above.
 
-    # Build preview string from last message being evicted
-    last_evicted = in_context_messages[cutoff_idx - 1]
-    preview = _extract_preview(last_evicted)
-    return cutoff_idx, preview
+**7b. Warning injection site in `letta/agents/letta_agent_v3.py`** (~line 934)
 
-
-def _extract_preview(msg: Message, max_chars: int = 80) -> str:
-    """Extract a short text preview from a message for display in warnings."""
-    if msg.text:
-        return msg.text[:max_chars] + ("..." if len(msg.text) > max_chars else "")
-    return f"[{msg.role} message]"
-```
-
-**7b. Warning injection site in `letta/agents/letta_agent_v3.py`**  
-At the warning injection site (~line 934), before building the warning message:
-
-```python
-# Calculate eviction cutoff and store it
-from letta.services.summarizer.summarizer_sliding_window import find_eviction_cutoff
-cutoff_idx, cutoff_preview = await find_eviction_cutoff(
-    self.actor, self.agent_state.llm_config, messages
-)
-cutoff_msg_id = messages[cutoff_idx].id
-
-await self._set_eviction_cutoff_message_id(cutoff_msg_id)  # new helper, same pattern as _set_memory_pressure_alerted
-
-# Build warning with preview
-pct = int(current_tokens / self.agent_state.llm_config.context_window * 100)
-warning_text = (
-    f"{MESSAGE_SUMMARY_WARNING_STR}\n\n"
-    f"EVICTION PREVIEW: Messages through '{cutoff_preview}' will be removed. "
-    f"Context at {pct}% ({current_tokens} / {self.agent_state.llm_config.context_window} tokens)."
-)
-warning_message = Message.dict_to_message(
-    agent_id=self.agent_state.id,
-    model=self.agent_state.llm_config.model,
-    openai_message_dict={"role": "user", "content": _pack_system_alert(warning_text)},
-)
-```
-
-Need small helper `_pack_system_alert(text)` or just inline the JSON packaging (same pattern as `get_token_limit_warning`).
+At the existing warning injection point, before building the warning message:
+1. Call `find_eviction_cutoff(self.actor, self.agent_state.llm_config, messages)` to get `(cutoff_idx, cutoff_preview)`
+2. Extract the message ID at `cutoff_idx`
+3. Persist it via a new `_set_eviction_cutoff_message_id()` helper (same pattern as the existing `_set_memory_pressure_alerted()`)
+4. Build the warning text by appending to `MESSAGE_SUMMARY_WARNING_STR`: include current usage percentage and "Messages through '[preview]' will be evicted"
+5. Package it as a system alert using the same pattern as the existing `get_token_limit_warning()` — either inline or extract a small `_pack_system_alert(text)` helper
 
 ---
 
@@ -495,7 +294,7 @@ Need small helper `_pack_system_alert(text)` or just inline the JSON packaging (
 | **Eviction Cutoff** | System-determined, fixed at warning time | LLMs can't count messages accurately. System calculates cutoff when warning fires, stores it, agent uses that fixed point. |
 | **Eviction Target** | 20% of context limit (percentage-based) | Scales naturally with context size. Warning at 80%, evict down to 20%. Hardcoded for MVP, TODO per-agent config. |
 | **Safety Mechanism** | Non-empty `summary` + sanity check | Summary = substantive guard. Sanity check = verify memory tool calls since warning. |
-| **Sanity Check** | `confirmed: bool = False` param | If no memory tool calls since warning, return warning. Agent adds `confirmed=True` to proceed (no re-entering summary). |
+| **Sanity Check** | `skip_sanity_check: str = ""` param | If no memory tool calls since warning, return warning. Agent passes `skip_sanity_check="sweep complete"` to proceed (no re-entering summary). Explicit string forces conscious acknowledgment — avoids bool footgun. |
 | **Rollover Block** | Create-if-missing | Tool handles block lifecycle, agent doesn't need to pre-create |
 | **Message Deletion** | Soft delete via `update_message_ids_async` | Trims from context window only — messages remain in DB, searchable via `conversation_search`. Hard delete deliberately NOT used. |
 | **Preview tool** | Yes (companion tool) | `preview_eviction()` returns token estimate so agent can understand impact before committing. |
@@ -512,7 +311,7 @@ Need small helper `_pack_system_alert(text)` or just inline the JSON packaging (
 5. Agent does memory sweep knowing precisely what's at stake
 6. Agent calls evict — no cutoff parameter needed, system uses stored cutoff
 
-**Sanity check:** Before eviction, scan for memory tool calls since the warning. If none found and `confirmed=False`, return a warning asking the agent to confirm they really want to evict without saving anything. Agent can add `confirmed=True` to proceed — importantly, they don't need to re-enter the summary.
+**Sanity check:** Before eviction, scan for memory tool calls since the warning. If none found and `skip_sanity_check != "sweep complete"`, return a warning asking the agent to save their context first. Agent can pass `skip_sanity_check="sweep complete"` to proceed — importantly, they don't need to re-enter the summary.
 
 ### Deferred to v2
 
@@ -559,10 +358,7 @@ Uses and extends infrastructure from Feb 17-21 compaction warning work:
 ### Implementation Notes / Gotchas
 
 **1. keep_ids deduplication**  
-If cutoff happens to be at the system message, deduplication needed. Implementation uses `dict.fromkeys()` to preserve order while deduplicating:
-```python
-keep_ids = list(dict.fromkeys([all_messages[0].id] + [m.id for m in all_messages[cutoff_idx:]]))
-```
+If the cutoff happens to land at the system message (index 0), naively prepending it again would duplicate it. Use `dict.fromkeys()` when building `keep_ids` — it preserves insertion order while deduplicating.
 
 **2. Method names — VERIFIED (Sonnet, Feb 23)**  
 - `list_messages` (NOT `list_messages_async`) — `async def list_messages` in MessageManager. Pass `limit=None` for all messages.
@@ -570,20 +366,10 @@ keep_ids = list(dict.fromkeys([all_messages[0].id] + [m.id for m in all_messages
 - `attach_block_async` — confirmed ✅ on AgentManager
 
 **3. Empty message list guard**  
-If `all_messages` is empty for some reason, `all_messages[0]` will raise IndexError. Add guard:
-```python
-if not all_messages:
-    return "Error: No messages found in context. Nothing to evict."
-```
+If `all_messages` is empty (shouldn't happen, but be safe), `all_messages[0]` would raise `IndexError`. Return a clear error string instead.
 
 **4. Cutoff not found guard**  
-If `eviction_cutoff_message_id` doesn't match any message (edge case — message deleted?), need graceful fallback:
-```python
-cutoff_idx = next(
-    (i for i, m in enumerate(all_messages) if m.id == cutoff_message_id),
-    len(all_messages)  # fallback: keep all if cutoff not found
-)
-```
+If `eviction_cutoff_message_id` doesn't match any message in the list (edge case: message already deleted?), fall back to `len(all_messages)` as the cutoff index — effectively keeping everything rather than silently evicting the wrong things.
 
 **5. Warning system changes**  
 The warning system needs to:
@@ -619,7 +405,7 @@ This is additional work beyond the tool itself — estimate ~20-30 lines in warn
 
 2. **Rollover block label:** Hardcode `"rollover"` for MVP. Can make configurable later if needed.
 
-3. ~~**Confirm parameter**~~ → **REPLACED** with `confirmed: bool` for sanity check bypass (see Part 6).
+3. ~~**Confirm parameter**~~ → **REPLACED** with `skip_sanity_check: str` — pass `"sweep complete"` to bypass (see Part 6).
 
 4. **Test strategy:** TBD — likely Haiku in test container first.
 
@@ -682,7 +468,7 @@ These fields/capabilities need to be added to support the new design:
 1. Trigger warning
 2. Call `evict_messages_and_recompile(summary="...")` WITHOUT any memory tool calls
 3. **Verify:** Warning returned, eviction did NOT happen
-4. Call again with `confirmed=True`
+4. Call again with `skip_sanity_check="sweep complete"`
 5. **Verify:** Eviction proceeds
 
 ### Success Criteria
@@ -746,8 +532,8 @@ letta/services/agent_manager.py                        — add to scalar_updates
 ### Tool Signature (LLM-visible)
 ```python
 evict_messages_and_recompile(
-    summary: str,              # Required, non-empty
-    confirmed: bool = False    # Set True to skip sanity check
+    summary: str,                    # Required, non-empty
+    skip_sanity_check: str = ""      # Pass "sweep complete" to skip sanity check
 ) -> str
 ```
 
@@ -797,11 +583,12 @@ Deferred because message decoration requires hooking into context rendering — 
 **Problem:** Agent might panic-evict without saving anything important.
 
 **Solution:** Before evicting, scan for memory tool calls since the warning.
-- If no memory tool calls found AND `confirmed=False`: return warning, don't evict
-- Agent can add `confirmed=True` to proceed
+- If no memory tool calls found AND `skip_sanity_check != "sweep complete"`: return warning, don't evict
+- Agent passes `skip_sanity_check="sweep complete"` to proceed
 - **Key UX:** Agent doesn't re-enter summary — it's already in the args
+- **Why a string over a bool:** Forces conscious acknowledgment. `confirmed=True` is a footgun — easy to pass reflexively. `"sweep complete"` requires the agent to actually mean it.
 
-**Implementation:** Scan `all_messages` for `tool_call` messages where name is in `BASE_MEMORY_TOOLS`, between warning timestamp and now.
+**Implementation:** Scan recent messages for assistant `tool_calls` where `function.name` is in `BASE_MEMORY_TOOLS`.
 
 ### Preview Tool (Companion)
 
@@ -815,8 +602,10 @@ Deferred because message decoration requires hooking into context rendering — 
 - Absolute max threshold → halt agent until user intervention
 - Deferred — need core working first
 
-### Token Counting
+### Token Counting — RESOLVED (Sonnet, Feb 23)
 
-The existing 80% warning mechanism already counts tokens robustly. The eviction calculation should reuse that same utility rather than re-implementing.
+The existing 80% warning mechanism already counts tokens robustly. The eviction calculation reuses that same utility.
 
-**Open question:** Does `Message` schema have a `token_count` field? If yes, easy. If not, need tokenizer call or to add the field. Sonnet to verify.
+`Message` schema has **no** `token_count` field. Two separate uses, two separate tools:
+- "Should we fire?" → `agent_state.context_token_estimate` (persisted total from last LLM call) ✅ already used
+- "Which message is the cutoff?" → `count_tokens(actor, llm_config, kept_messages)` on subsets, from `letta.services.summarizer.summarizer_sliding_window` (already imported in `letta_agent_v3.py`)
