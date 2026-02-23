@@ -9,7 +9,8 @@
       "Bash(git diff:*)",
       "Bash(git show:*)",
       "Bash(dir C:/Git/LettaSource/letta/alembic/versions | Select-Object -First 20)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Edit(Agentic Compaction Planning/**)"
     ]
   }
 }
