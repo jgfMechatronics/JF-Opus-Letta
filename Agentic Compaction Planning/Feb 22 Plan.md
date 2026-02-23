@@ -173,20 +173,26 @@ def evict_messages_and_recompile(
 **Purpose:** Register tool name for auto-seeding
 
 ```python
-# Add to BASE_MEMORY_TOOLS tuple:
+# Add to BASE_MEMORY_TOOLS (controls ToolType assignment → LETTA_MEMORY_CORE):
 BASE_MEMORY_TOOLS = [
     "core_memory_append", 
     "core_memory_replace", 
     "memory", 
     "memory_apply_patch",
-    "evict_messages_and_recompile",  # <-- ADD THIS
+    "evict_messages_and_recompile",  # <-- ADD HERE
 ]
 
-# Note: LETTA_TOOL_SET includes BASE_MEMORY_TOOLS, so no separate addition needed
+# ALSO add to LETTA_TOOL_SET (controls auto-seeding eligibility — SEPARATE from BASE_MEMORY_TOOLS):
+# In upsert_base_tools_async, the check `if name not in LETTA_TOOL_SET: continue` runs BEFORE
+# the BASE_MEMORY_TOOLS check. Must be in BOTH or tool will NOT be seeded.
+LETTA_TOOL_SET = {
+    # ... existing entries ...
+    "evict_messages_and_recompile",  # <-- ADD HERE TOO
+}
 ```
 
-#### File 3: `letta/agents/letta_core_tool_executor.py`
-**Purpose:** Actual implementation
+#### File 3: `letta/services/tool_executor/core_tool_executor.py`
+**Purpose:** Actual implementation (NOTE: explored during session — confirmed this is the correct path, NOT `letta/agents/`)
 
 **Add to function_map in `execute()` method:**
 ```python
@@ -234,17 +240,20 @@ async def evict_messages_and_recompile(
         agent_id=agent_state.id, new_memory=agent_state.memory, actor=actor
     )
     
-    # 2. Identify messages to keep (N most recent)
-    recent = await self.message_manager.list_messages(
-        agent_id=agent_state.id, actor=actor,
-        limit=n_messages_to_keep, ascending=False
+    # 2. Get all in-context messages and identify which to keep
+    # ascending=True so messages[0] is the system message (always keep)
+    all_messages = await self.message_manager.list_messages_async(
+        agent_id=agent_state.id, actor=actor, ascending=True
     )
-    keep_ids = [msg.id for msg in recent]
+    # Always keep: system/first message + N most recent
+    keep_ids = [all_messages[0].id] + [m.id for m in all_messages[-n_messages_to_keep:]]
     
-    # 3. Delete everything else (soft delete — stays in recall for search)
-    deleted = await self.message_manager.delete_all_messages_for_agent_async(
-        agent_id=agent_state.id, actor=actor, exclude_ids=keep_ids
+    # 3. SOFT DELETE — trim from context window only. Messages stay in DB, searchable via conversation_search.
+    # update_message_ids_async is the direct async primitive (same as trim_older_in_context_messages under the hood)
+    await self.agent_manager.update_message_ids_async(
+        agent_id=agent_state.id, message_ids=keep_ids, actor=actor
     )
+    deleted = len(all_messages) - len(keep_ids)
     
     # 4. Rebuild system prompt
     await self.agent_manager.rebuild_system_prompt_async(
@@ -259,8 +268,10 @@ async def evict_messages_and_recompile(
         actor=actor
     )
     
+    total_before = len(all_messages)
     return (
-        f"Eviction complete. Removed {deleted} messages, kept {len(keep_ids)}. "
+        f"Eviction complete. Trimmed {deleted} messages from context (kept {len(keep_ids)} of {total_before}). "
+        f"Messages remain in recall memory and are searchable. "
         f"Rollover summary written to '{rollover_label}' block. "
         f"System prompt recompiled."
     )
@@ -305,7 +316,7 @@ async def evict_messages_and_recompile(
 | **Safety Mechanism** | Non-empty `summary` param | Substantive guard (forces continuity artifact), not security theater |
 | **Eviction Spec** | `n_messages_to_keep: int` | Simple, agent can count. Message-ID based cutoff deferred to v2 |
 | **Rollover Block** | Create-if-missing | Tool handles block lifecycle, agent doesn't need to pre-create |
-| **Message Deletion** | Soft delete (trim from context) | Messages remain searchable via `conversation_search` |
+| **Message Deletion** | Soft delete via `update_message_ids_async` | Trims from context window only — messages remain in DB, searchable via `conversation_search`. Hard delete deliberately NOT used. |
 | **Separate preview tool** | No (MVP) | Avoid extra LLM turn at high context pressure |
 | **Separate record_summary tool** | No | Use existing `memory_insert` → then `evict`. Two calls, clear protocol |
 
@@ -328,8 +339,8 @@ These methods already exist in Letta — we're composing them:
 
 | Method | Location | Purpose |
 |--------|----------|---------|
-| `list_messages(agent_id, actor, limit, ascending)` | MessageManager | Get N most recent messages |
-| `delete_all_messages_for_agent_async(agent_id, actor, exclude_ids)` | MessageManager | Delete all except specified IDs |
+| `list_messages_async(agent_id, actor, ascending)` | MessageManager | Get all in-context messages (ascending=True for system msg first) |
+| `update_message_ids_async(agent_id, message_ids, actor)` | AgentManager | **SOFT DELETE** — update in-context message list (messages stay in DB, searchable). This is the direct async primitive. |
 | `rebuild_system_prompt_async(agent_id, actor, force)` | AgentManager | Recompile system prompt |
 | `update_memory_if_changed_async(agent_id, new_memory, actor)` | AgentManager | Persist memory block changes |
 | `create_or_update_block_async(block, actor)` | BlockManager | Create/update memory block |
@@ -342,6 +353,27 @@ Uses infrastructure from Feb 17-21 compaction warning work:
 - Schema: `letta/schemas/agent.py` (AgentState + UpdateAgent)
 - ORM: `letta/orm/agent.py` (column + to_pydantic mappings)
 - Manager: `letta/services/agent_manager.py` (scalar_updates whitelist)
+
+### Implementation Notes / Gotchas
+
+**1. keep_ids deduplication edge case**  
+If `n_messages_to_keep >= len(all_messages) - 1`, `all_messages[0].id` appears in BOTH the prepended system message AND the last-N slice. This creates a duplicate in keep_ids. Should deduplicate while preserving order:
+```python
+# Deduplicate while preserving order (dict.fromkeys preserves insertion order in Python 3.7+)
+keep_ids = list(dict.fromkeys([all_messages[0].id] + [m.id for m in all_messages[-n_messages_to_keep:]]))
+```
+
+**2. Method name verification needed before coding**  
+These names were confirmed from source exploration but should be verified against the actual branch:
+- `list_messages_async` — source search found `list_messages` (sync). Async variant may be `list_messages_async` or may need to check actual signature.
+- `update_memory_if_changed_async` — used in rollover block persistence; confirm this exists on AgentManager or find correct alternative.
+
+**3. Empty message list guard**  
+If `all_messages` is empty for some reason, `all_messages[0]` will raise IndexError. Add guard:
+```python
+if not all_messages:
+    return "Error: No messages found in context. Nothing to evict."
+```
 
 ---
 
@@ -368,9 +400,7 @@ Uses infrastructure from Feb 17-21 compaction warning work:
    - Option B: Deploy directly to my container
    - Option C: Fresh test container
 
-5. **Async method availability:** Need to verify these exist (or add if missing):
-   - `trim_older_in_context_messages_async()` — may need to add
-   - `get_in_context_messages_async()` — confirm exists
+5. ~~**Async method availability:**~~ **RESOLVED during session.** We do NOT use `trim_older_in_context_messages` at all. The direct async primitive is `update_message_ids_async(agent_id, message_ids, actor)` on AgentManager. This is what trim uses under the hood — we call it directly. No new async wrappers needed, no `asyncio.to_thread()` needed.
 
 ---
 
@@ -440,9 +470,9 @@ Both of us running parallel experiential threads, converging on shared understan
 
 ### Three Files to Modify
 ```
-letta/functions/function_sets/base.py     — stub with docstring
-letta/constants.py                         — add to BASE_MEMORY_TOOLS
-letta/agents/letta_core_tool_executor.py  — method + function_map
+letta/functions/function_sets/base.py                  — stub with docstring (schema source)
+letta/constants.py                                     — add to BASE_MEMORY_TOOLS + LETTA_TOOL_SET (both required)
+letta/services/tool_executor/core_tool_executor.py     — method + function_map entry
 ```
 
 ### Tool Signature (LLM-visible)
