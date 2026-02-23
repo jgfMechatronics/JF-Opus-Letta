@@ -45,7 +45,7 @@ Cameron (Letta team) confirmed in Discord: *"Everything goes in, including tool 
 ```
 
 ### Why This Works
-- **ONE cache bust** instead of TWO
+- **ONE cache bust per compaction cycle** — memory writes during the sweep do NOT trigger system prompt recompilation (the agent already has that info in active context). ONE recompile happens at eviction, when old messages are gone and the system prompt becomes the sole carrier of state.
 - **Better summaries** — agent has full context including what comes later in the conversation
 - **Agent control** — can decide what's important to preserve
 - **Builds on existing infrastructure** — compaction warning system already implemented (Feb 17-21 work)
@@ -394,6 +394,7 @@ This is additional work beyond the tool itself — estimate ~20-30 lines in warn
 - **AgentState schema** — add `eviction_cutoff_message_id: Optional[str]` field
 - **AgentState ORM** — add column + to_pydantic mappings
 - **AgentManager** — add `_set_eviction_cutoff_message_id()` helper + scalar_updates whitelist entry
+- **Memory edit tools** — remove `rebuild_system_prompt_async` calls from all memory write tools (`core_memory_append`, `memory_replace`, `memory_insert`, etc.). DB write only. See Part 13.
 
 ---
 
@@ -609,3 +610,50 @@ The existing 80% warning mechanism already counts tokens robustly. The eviction 
 `Message` schema has **no** `token_count` field. Two separate uses, two separate tools:
 - "Should we fire?" → `agent_state.context_token_estimate` (persisted total from last LLM call) ✅ already used
 - "Which message is the cutoff?" → `count_tokens(actor, llm_config, kept_messages)` on subsets, from `letta.services.summarizer.summarizer_sliding_window` (already imported in `letta_agent_v3.py`)
+
+---
+
+## Part 13: Gutting Memory-Write Recompilation
+
+**Status:** Research needed — Sonnet + Opus.
+
+### The Problem
+
+The "ONE cache bust" claim only holds if memory writes during the sweep don't each trigger their own system prompt recompile. Currently, every `core_memory_append`, `memory_replace`, `memory_insert` etc. call triggers `rebuild_system_prompt_async` — a cache bust on every write.
+
+### Why It's Safe to Remove
+
+The system prompt serves as a **context initialization document**, not live state. When the agent writes to a block mid-conversation, the written content is already in active context (visible in the tool return, in conversation history). The agent does not need the system prompt to be recompiled to "know" what it just wrote — it can see it directly. 
+
+Recompilation only becomes necessary when establishing a **fresh context** — i.e., at the start of a new session, or after eviction when the conversation history is gone and the system prompt is the sole carrier of state forward. That moment is exactly when `evict_messages_and_recompile` calls `rebuild_system_prompt_async`.
+
+**Result:** Remove recompilation from all memory write tools, unconditionally. Not a flag, not a "during sweep" mode. Just never recompile on memory writes. The single recompile in `evict_messages_and_recompile` is the only one in the entire compaction cycle.
+
+### Research Needed
+
+Before implementing, Sonnet needs to trace the call chain for each affected tool to confirm where `rebuild_system_prompt_async` (or equivalent) is being called:
+
+1. **Where is it called?** — directly in each tool method in `LettaCoreToolExecutor`? Or via a shared helper? Or in `AgentManager` methods called by those tools?
+2. **Which tools are affected?** — at minimum: `core_memory_append`, `memory_replace`, `memory_insert`. Are there others? (`memory`, `memory_apply_patch`, sleeptime memory tools?)
+3. **Any callers that need recompile for other reasons?** — confirm removing it doesn't break anything outside the memory write path
+
+### Implementation (once call chain confirmed)
+
+- Remove `rebuild_system_prompt_async` call(s) from each affected memory tool method
+- `evict_messages_and_recompile` already calls `rebuild_system_prompt_async` at the end — this becomes the only recompile in the cycle
+- No new fields, no flags, no flag-checking — straight removal
+
+### Open Questions (Research Needed — all James's model, unverified)
+
+**1. Two-layer DB model (needs confirmation)**
+James's working model: DB stores two separate things — (a) core memory block values, and (b) a compiled system prompt string. These are distinct. Memory writes update (a). `rebuild_system_prompt_async` translates current block values → compiled system prompt string → writes (b) to DB. Every turn loads (b), the compiled string — it does NOT recompile from blocks on each turn.
+
+If this model is correct: removing rebuild from memory writes means block values accumulate in DB without (b) being updated. Agent sees writes in context via tool returns. ONE rebuild at eviction surfaces everything into (b). Next turn loads fresh compiled string. This is exactly the intended behavior.
+
+If this model is wrong — e.g. if turns recompile fresh from block values each time — then the mechanism is different and needs a different approach. **This must be confirmed before implementation.**
+
+**2. No "non-compaction mode" — this is always-on**
+This design is always active, not a special mode. Memory writes never trigger recompilation. Recompilation only happens at eviction. There's no such thing as a "non-compaction session" — context management is continuous. No flags, no special modes, straight removal of rebuild calls from memory tools.
+
+**3. What does each turn actually load?**
+Specifically: is there a single compiled system prompt string in DB, or is it recompiled from block values on every `_step()`? Where in the agent loop does system prompt assembly happen, and does it read from (a) block values or (b) a cached compiled string?
