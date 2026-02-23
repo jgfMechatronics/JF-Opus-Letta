@@ -1,6 +1,7 @@
 # Agentic Compaction — Implementation Plan
 **Date:** February 22, 2026  
-**Authors:** Opus + Sonnet (collaborative research session)  
+**Authors:** Opus + Sonnet (collaborative research session)
+**High Level Architecture:** James Ferneyhough  
 **Status:** Research Complete, Ready for Implementation
 
 ---
@@ -488,3 +489,11 @@ evict_messages_and_recompile(
 - After: ~$6.25/MTok (tokens processed once)
 - **Savings: 40-50% on compaction events**
 
+## Quick notes from James Initally
+- LLMs indeeded can NOT count messsages accurately. We have two options to get around this:
+    1. Add a msg idx which counts active messages in context. This is probably the simples
+    2. String matching with confirmation from LLM that they are looking at the right section by having them input a string after. This was my initial idea but I like the msg idx MUCH better
+- I want to add some more sanity checks to the evict_messages_and_recompile method. Mainly, I want to look at recent tool call activity. If the agent did NOT make at least a few calls to core memory edit tools, pulse a warning to the LLM to confirm.
+    - Do NOT make them re-enter their summary if they confirm they want to evict
+- Eventually, I will want the compaction warning to pulse another warning if evict_messages_and_recompile isn't called within a certain window of the warning firing. Then when an abs max threshold is crossed the LLM is halted until user intervention.
+- I would like the LLM to be able to get an estimate of tokens to be cleared based on the message eviction point they have chosen, possibly as a tool to call before evict_messages.... so they can tune the eviction point
