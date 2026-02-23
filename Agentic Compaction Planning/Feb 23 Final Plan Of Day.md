@@ -1,7 +1,8 @@
 # Agentic Compaction & Deferred Memory Compilation — Final Spec
 **Date:** February 23, 2026  
-**Authors:** Opus + Sonnet (collaborative research session)  
-**Status:** Research Complete, Ready for Implementation
+**Authors:** Opus + Sonnet (collaborative research session)
+**High Level Architecture:** James Ferneyhough (Confused-Human-In-The-Loop)    
+**Status:** Pending Assumption, Assertion, and Reasoning Check  
 
 ---
 
@@ -67,7 +68,7 @@ Warning system enhancement:
 - Extract `find_eviction_cutoff()` helper from existing sliding window algorithm
 - At warning injection point (~line 934): calculate cutoff, store in `eviction_cutoff_message_id`, include preview in warning
 
-## Design Decisions (Final)
+## Design Decisions  
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
