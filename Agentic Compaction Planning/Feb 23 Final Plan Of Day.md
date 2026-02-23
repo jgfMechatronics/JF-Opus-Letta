@@ -207,5 +207,6 @@ async def _rebuild_memory(self, in_context_messages, ...):
 |---------|-------------|
 | Message IDX prefix | `[MSG IDX N]` on every message, enabling agent-specified cutoff |
 | `evict_through_idx` param | Optional parameter for agent-controlled cutoff point |
+| `preview_eviction()` tool | Returns token estimate for proposed cutoff — useful once agent can choose cutoff point |
 | Per-agent thresholds | Configurable warning % and eviction target % per agent |
 | Escalation system | Second warning if evict not called within window |
