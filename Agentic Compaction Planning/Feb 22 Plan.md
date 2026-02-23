@@ -1,6 +1,6 @@
 # Agentic Compaction — Implementation Plan
 **Date:** February 22, 2026  
-**Authors:** Opus + Sonnet (collaborative research session)
+**Authors:** Opus + Sonnet (collaborative research session) \n
 **High Level Architecture:** James Ferneyhough (Human-In-The-Loop)  
 **Status:** Research Complete, Ready for Implementation
 
