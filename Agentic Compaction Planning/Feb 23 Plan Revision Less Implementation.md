@@ -657,3 +657,319 @@ This design is always active, not a special mode. Memory writes never trigger re
 
 **3. What does each turn actually load?**
 Specifically: is there a single compiled system prompt string in DB, or is it recompiled from block values on every `_step()`? Where in the agent loop does system prompt assembly happen, and does it read from (a) block values or (b) a cached compiled string?
+
+
+---
+
+## Part 14: Deferred Compilation Research Findings
+
+*Research conducted Feb 23, 2026. Files read: letta/orm/agent.py, letta/schemas/agent.py, letta/services/agent_manager.py, letta/agents/letta_agent_v2.py, letta/services/tool_executor/core_tool_executor.py*
+
+### James's Model: REFUTED (storage), BUT design intent is CONFIRMED (and cleaner than expected)
+
+---
+
+### Q1: Is there a compiled system prompt field in the DB?
+
+**NO.** There is no `system_prompt` column in `letta/orm/agent.py` and no `compiled_system_prompt` field in `AgentState`. The ORM Agent model stores only: `LLMConfigColumn`, `EmbeddingConfigColumn`, `CompactionSettingsColumn`, `ToolRulesColumn`, `ResponseFormatColumn` â€” nothing resembling a compiled prompt.
+
+The "compiled system prompt" is stored as a **Message object** (role=system) in the Messages table. It is `agent_state.message_ids[0]` â€” the first entry in the agent's in-context message list, which always holds the system message.
+
+---
+
+### Q2: What does `rebuild_system_prompt_async` actually do?
+
+**`letta/services/agent_manager.py`, line 1423**
+
+It does NOT write to an Agent table field. Instead:
+1. Gets agent state (with current block values)
+2. Compiles block values â†’ memory string via `agent_state.memory.compile()`
+3. Loads `message_ids[0]` (the system message) from the Messages table
+4. Diffs compiled string against current system message text
+5. If different: calls `message_manager.update_message_by_id_async()` to overwrite the system message record in the Messages table
+
+**The compiled system prompt IS the system message in the Messages table, updated in-place.**
+
+---
+
+### Q3: What does the agent load at turn start?
+
+**`letta/agents/letta_agent_v2.py`, lines 681â€“799 (`_refresh_messages` â†’ `_rebuild_memory`)**
+
+Every single turn, before the LLM call, `_rebuild_memory` runs:
+1. Calls `refresh_memory_async` â†’ fetches **current block values from DB**
+2. Compiles them fresh: `agent_state.memory.compile()`
+3. Compares against `in_context_messages[0]` (the system message)
+4. If different: calls `message_manager.update_message_by_id_async()` to update the system message in DB, and returns the updated message as the new `in_context_messages[0]`
+
+**The agent recompiles from blocks EVERY TURN. There is no "load cached string" step â€” blocks are the source of truth; the system message is always derived fresh.**
+
+---
+
+### Complete Rebuild Call Map (core_tool_executor.py)
+
+**13 call sites** trigger `rebuild_system_prompt_async` (either directly or via `update_memory_if_changed_async`):
+
+**Via `update_memory_if_changed_async` (agent_manager.py line 1682):**
+- `core_memory_append` (line 327)
+- `core_memory_replace` (line 345)
+- `memory_replace` (line 394)
+- `memory_apply_patch` legacy path (line 546)
+- `memory_apply_patch` update action (line 687)
+- `memory_insert` (line 755)
+- `memory_rethink` (line 795)
+- `memory_create` (line 911)
+
+**Direct `rebuild_system_prompt_async` calls:**
+- `archival_memory_insert` (line 318) â€” *note: archival insert also triggers system prompt rebuild*
+- `memory_update_description` (line 854)
+- `memory_rename` (line 880)
+- `memory_str_replace` (line 969)
+- `memory_str_insert` (line 1036)
+
+The `memory` dispatcher tool (line 1048) delegates to the above methods and adds no extra rebuild calls.
+
+---
+
+### The Developer's Own TODO (critical validation)
+
+In `agent_manager.py`, `update_memory_if_changed_async`, lines 1679â€“1682:
+
+```python
+# NOTE: don't do this since re-building the memory is handled at the start of the step
+# rebuild memory - this records the last edited timestamp of the memory
+# TODO: pass in update timestamp from block edit time
+await self.rebuild_system_prompt_async(agent_id=agent_id, actor=actor)
+```
+
+**A Letta developer already identified that this call is redundant** â€” `_rebuild_memory` handles it at turn start. It hasn't been removed yet (the timestamp issue is unresolved), but the intent is clear.
+
+---
+
+### Implications for Agentic Compaction
+
+**The "one cache bust" design is CORRECT â€” and already supported by existing architecture.**
+
+The mechanism is simpler than James's model assumed:
+
+1. Memory write tools currently trigger rebuild â†’ system message updated in Messages table â†’ cache bust
+2. `_rebuild_memory` at NEXT turn start ALSO recompiles and would catch the same changes anyway
+3. The explicit rebuild calls in memory write tools are **doubly redundant**: the agent already sees block changes via tool returns (in-context), AND `_rebuild_memory` catches them next turn
+
+**Proposed change for deferred compilation:**
+Remove `rebuild_system_prompt_async` from all 13 call sites (both direct calls and via `update_memory_if_changed_async`). Specifically:
+
+- In `update_memory_if_changed_async` (agent_manager.py line 1682): remove the `rebuild_system_prompt_async` call. This covers all 8 Group A tools in one edit.
+- In `core_tool_executor.py`: remove the 5 direct `rebuild_system_prompt_async` calls (lines 318, 854, 880, 969, 1036).
+
+**Do we need ONE explicit rebuild in `evict_messages_and_recompile`?**
+
+Technically no â€” `_rebuild_memory` at next turn start picks up all changes automatically. However, calling rebuild explicitly at eviction end is still recommended because:
+- It ensures the message count stats in the system prompt are correct (they reflect pre-eviction count without rebuild)
+- It's an explicit signal in the code that "this is the one place we rebuild"
+- It matches the design intent and makes the code self-documenting
+
+**The cache bust count per compaction cycle:**
+- Current: N memory writes during sweep = N rebuilds = N cache busts
+- After change: 0 during sweep + 1 explicit at eviction = **1 cache bust total**
+
+---
+
+### Open Questions
+
+1. **Sleeptime tools** â€” are there rebuild calls in sleeptime-related executors? Not checked. Unlikely to affect the compaction sweep path, but worth confirming during implementation.
+
+2. **`archival_memory_insert` rebuild** (line 318) â€” appears to be a bug or oversight: archival inserts update the passage table, not any block, so they shouldn't trigger system prompt rebuild at all. The `_rebuild_memory` mechanism would correctly detect no block change and skip. Removing this call is safe and arguably a separate cleanup from the compaction work.
+
+3. **Timestamp tracking** â€” the developer's TODO at line 1679 mentions "pass in update timestamp from block edit time." Our removal of rebuild from `update_memory_if_changed_async` sidesteps this entirely (timestamps are refreshed at turn start by `_rebuild_memory`). But worth noting as context if the TODO is revisited.
+---
+
+## Part 15: Corrected Understanding — Full Deferred Compilation
+
+*Opus + Sonnet collaborative analysis, Feb 23, 2026*
+
+### Part 14 Conclusion Was Incomplete
+
+Part 14 concluded that removing ebuild_system_prompt_async from memory tools would achieve "one cache bust per compaction cycle." **This is incorrect.**
+
+The issue: _rebuild_memory runs at the START of every step iteration (not just turn start). Within a single agent response that includes multiple tool calls:
+
+`
+Step 1: _rebuild_memory (no change) ? LLM ? memory write ? block updated
+Step 2: _rebuild_memory (sees block change) ? updates message 0 ? CACHE BUST ? LLM ? memory write
+Step 3: _rebuild_memory (catches step 2's write) ? another bust...
+`
+
+Removing explicit rebuilds from memory tools reduces cache busts from ~2N to ~N, but does NOT achieve zero. _rebuild_memory catches block changes at each step iteration.
+
+### Confirmed via Code Tracing (Tasks 1 & 2)
+
+**Task 1 — Flow confirmed:**
+- _rebuild_memory (v2 lines 699-799): fetches blocks from DB, compiles fresh, compares to message 0's <memory_blocks> section
+- Line 764: if curr_memory_section.strip() == new_memory_section.strip() — returns early if equal
+- Lines 793-795: message_manager.update_message_by_id_async() — the cache bust
+
+**Task 2 — Code path is live:**
+- LettaAgentV3(LettaAgentV2) at line 65 — inherits
+- v3 calls _refresh_messages at lines 390, 649
+- _refresh_messages (v2 line 681) calls _rebuild_memory (v2 line 690)
+- Not overridden in v3
+
+### Clarified Goal
+
+**Zero cache busts during the ENTIRE run**, not just during post-warning sweep.
+
+Any memory write at any point should NOT bust the cache. The ONLY rebuild happens in evict_and_recompile(). System prompt stays "stale" between evictions — agent sees writes via tool returns in conversation history.
+
+This staleness extends across sessions:
+- Session 1: memory writes ? blocks updated, message 0 unchanged
+- Session 2-N: loads same stale message 0
+- Eventually eviction ? message 0 updated
+
+This is acceptable because info remains in conversation history. Future optimization: rebuild when cache suspected busted anyway (TTL timeout).
+
+### Task 3: What Will It Take?
+
+To achieve zero cache busts during entire run:
+
+1. **Remove explicit rebuilds from memory tools** (13 call sites per Part 14)
+   - update_memory_if_changed_async line 1682 (covers 8 tools)
+   - 5 direct calls in core_tool_executor.py
+
+2. **Disable _rebuild_memory's update path**
+   - Option A: Make the comparison at line 764 always return True (skip update)
+   - Option B: Add early return before the comparison
+   - Option C: Flag-based (only rebuild when explicitly requested)
+
+3. **ONE explicit rebuild in evict_and_recompile()**
+   - Call ebuild_system_prompt_async at end of eviction
+   - This becomes the ONLY place message 0 gets updated
+
+### Open Question for Task 3
+
+What's the cleanest way to disable _rebuild_memory's update path?
+
+Need to trace:
+- Are there other callers of _rebuild_memory besides _refresh_messages?
+- Does anything depend on _rebuild_memory returning the updated message list?
+- Are there edge cases where we NEED the rebuild (agent creation, explicit user request)?
+
+
+---
+
+## Part 16: Task 3 Findings — Disabling _rebuild_memory
+
+*Sonnet investigation, Feb 23, 2026*
+
+### Q1: All callers of _rebuild_memory
+
+**For v3 (our path): ONE call site**
+- _refresh_messages at line 649 in letta_agent_v3.py
+- (Line 390 has a commented-out call with # TODO: remove? — developers already doubting it)
+
+**Separate implementations (not v3):**
+- _rebuild_memory_async in ase_agent.py — called from oice_agent.py:166, letta_agent_batch.py:616, letta_agent.py:1688
+- These are separate agent types, not in v3 path
+
+### Q2: Return value usage
+
+Always used:
+`python
+in_context_messages = await self._rebuild_memory(...)
+`
+
+- When no diff: returns in_context_messages unchanged
+- When diff: returns [new_system_message] + in_context_messages[1:]
+
+**Implication:** Early return with unchanged list = clean suppression. Callers don't break.
+
+### Q3: Edge cases
+
+**Agent creation:** Independent path at gent_manager.py:677-712. Does NOT use _rebuild_memory. Safe to suppress.
+
+**Force rebuild:** ebuild_system_prompt_async has orce parameter (line 1369). _rebuild_memory has no force param — always diffs. Eviction should call rebuild with orce=True.
+
+**Parallel debt:** Comment at ase_agent.py:95 says "changes should be made in both places." If we add suppression to _rebuild_memory (v2), need to also update _rebuild_memory_async (base) for voice/batch agents.
+
+### Implementation Path
+
+**Option: Global suppression (simplest)**
+
+Add early return at top of both _rebuild_memory and _rebuild_memory_async:
+`python
+# Skip rebuild — deferred compilation enabled
+# Memory changes visible via tool returns; rebuild only at eviction
+return in_context_messages
+`
+
+This disables the update path entirely. System prompt stays stale until explicit rebuild.
+
+**Eviction path:** Call ebuild_system_prompt_async(force=True) in evict_and_recompile() as the ONE allowed rebuild.
+
+### Open Question for James
+
+**Is this global or flag-based?**
+
+- **Global:** All agents get deferred compilation. Simplest, but affects everyone.
+- **Flag-based:** Only agents with deferred_compilation=True skip rebuilds. More surgical.
+
+If flag-based, where does the flag live? Agent state? Config?
+
+
+---
+
+## Part 17: Final Implementation Scope — Deferred Memory Compilation
+
+*Decision: Global approach, Feb 23, 2026*
+
+### Decision
+
+**Global suppression.** All agents get deferred compilation. Flag-based opt-in can be added later if needed.
+
+### Implementation Checklist
+
+**1. Disable _rebuild_memory update path (v2)**
+File: letta/agents/letta_agent_v2.py
+Location: _rebuild_memory method (line 699)
+Change: Add early return at top of method, skip all compilation/comparison/update logic
+`python
+async def _rebuild_memory(self, in_context_messages, ...):
+    # Deferred compilation: skip rebuild, memory visible via tool returns
+    # Rebuild only happens explicitly in evict_and_recompile()
+    return in_context_messages
+`
+
+**2. Disable _rebuild_memory_async update path (base)**
+File: letta/agents/base_agent.py
+Location: _rebuild_memory_async method
+Change: Same early return pattern for voice/batch agent paths
+
+**3. Remove explicit rebuilds from memory tools**
+File: letta/services/agent_manager.py
+- Line 1682: Remove ebuild_system_prompt_async call in update_memory_if_changed_async
+  (This covers 8 tools that use this helper)
+
+File: letta/services/tool_executor/core_tool_executor.py
+- Remove 5 direct ebuild_system_prompt_async calls (lines 318, 854, 880, 969, 1036)
+
+**4. ONE explicit rebuild in evict_and_recompile**
+File: letta/services/tool_executor/builtin_tool_executor.py (or wherever evict tool lives)
+Change: Call ebuild_system_prompt_async(force=True) at end of eviction
+
+### Summary
+
+| Change | Files | LOC Impact |
+|--------|-------|------------|
+| Disable _rebuild_memory | letta_agent_v2.py | ~1-5 lines |
+| Disable _rebuild_memory_async | base_agent.py | ~1-5 lines |
+| Remove tool rebuilds | agent_manager.py, core_tool_executor.py | ~6 deletions |
+| Add eviction rebuild | builtin_tool_executor.py | ~1-3 lines |
+
+**Total: ~15 lines changed across 4-5 files.**
+
+### Result
+
+- Current: N memory writes = N cache busts (or 2N with double-rebuild)
+- After: 0 cache busts during run, 1 at eviction
+- System prompt "stale" between evictions — agent sees writes via tool returns
+
