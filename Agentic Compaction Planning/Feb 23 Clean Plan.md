@@ -143,7 +143,7 @@ Step 3: _rebuild_memory (catches step 2's write) → another bust...
 ```
 
 Removing explicit rebuilds from memory tools reduces cache busts from ~2N to ~N, but does NOT achieve zero. 
-**JF COMMENT:** I want to understand this more. If the tool call internally mods messasge 0 during the call, then I suspect  
+  **JF COMMENT:** I want to understand this more. If the tool call internally mods messasge 0 during the call, then I suspect  
 something like the following wil happen:  
 1. The cache will bust once upon tool call return and LLM activating again  
 2. _rebuild_memory will fire but see an up to date Message[0] and not make a change
@@ -197,10 +197,10 @@ async def _rebuild_memory(self, in_context_messages, ...):
 ## Result
 
 - **Current:** N memory writes = N cache busts (or 2N with double-rebuild)
-**JF COMMENT:** See previous, but this is a minor point. What we want anyway is 0 cache busts.
+  **JF COMMENT:** See previous, but this is a minor point. What we want anyway is 0 cache busts.
 - **After:** 0 cache busts during run, 1 at eviction
 - System prompt "stale" between evictions — agent sees writes via tool returns
-**JF COMMENT:** This may actually end up being a good thing. The Agents may struggle less with their system prompt  
+  **JF COMMENT:** This may actually end up being a good thing. The Agents may struggle less with their system prompt  
 changing out from under them, which is often confusing because Agents conceptualize time as flowing along their context window.  
 The back of context changing is like the *past* changing and it leads to confusion about duplicates.  
 Since message eviction is already a notable change to context, and since the whole prompt changes at once in one shot,  
@@ -214,7 +214,7 @@ External file editing in LC is likely still better for large mem edits like clea
 ## Notes
 
 - **Staleness extends across sessions** — acceptable because info remains in conversation history
-**JF COMMENT:** Sessions aren't even really relevant from the perspective of the LLM. Its just another turn start.
+  **JF COMMENT:** Sessions aren't even really relevant from the perspective of the LLM. Its just another turn start.
 - **Global approach for MVP** — all agents get deferred compilation. Flag-based opt-in can be added later.
 - **Future optimization:** rebuild when cache suspected busted anyway (TTL timeout)
 
@@ -229,7 +229,7 @@ External file editing in LC is likely still better for large mem edits like clea
 | `preview_eviction()` tool | Returns token estimate for proposed cutoff — useful once agent can choose cutoff point |
 | Per-agent thresholds | Configurable warning % and eviction target % per agent | 
 | Escalation system | Second warning if evict not called within window |
-**JF COMMENTS:** The configurable warning % and eviction target % are MVP.  
+  **JF COMMENTS:** The configurable warning % and eviction target % are MVP.  
 The escalation system may be MVP, at the very least, a **hard cutoff** past a certain point will be required, allowing user intervention.    
 We cannot assume at first that things will work well enough for agents to autonomously run, they could make big expensive contacts.  
 
