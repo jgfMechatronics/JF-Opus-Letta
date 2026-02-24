@@ -1,7 +1,7 @@
 # Agentic Compaction & Deferred Memory Compilation  
 **Date:** February 23, 2026  
-**Authors:** Opus + Sonnet (collaborative research session)
-**High Level Architecture:** James Ferneyhough (Confused-Human-In-The-Loop)    
+**Authors:** Opus + Sonnet (collaborative research session)  
+**High Level Architecture:** James Ferneyhough (Confused-Human-In-The-Loop)  
 **Status:** Pending Assumption, Assertion, and Reasoning Check  
 
 ---
