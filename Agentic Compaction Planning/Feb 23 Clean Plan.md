@@ -228,7 +228,8 @@ External file editing in LC is likely still better for large mem edits like clea
 | `evict_through_idx` param | Optional parameter for agent-controlled cutoff point |
 | `preview_eviction()` tool | Returns token estimate for proposed cutoff — useful once agent can choose cutoff point |
 | Per-agent thresholds | Configurable warning % and eviction target % per agent | 
-| Escalation system | Second warning if evict not called within window |
+| Escalation system | Second warning if evict not called within window |  
+
   **JF COMMENTS:** The configurable warning % and eviction target % are MVP.  
 The escalation system may be MVP, at the very least, a **hard cutoff** past a certain point will be required, allowing user intervention.    
 We cannot assume at first that things will work well enough for agents to autonomously run, they could make big expensive contacts.  
