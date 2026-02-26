@@ -1,10 +1,10 @@
 from typing import Literal
 
-from openai import AsyncOpenAI, AuthenticationError
+from openai import AsyncOpenAI, AuthenticationError, PermissionDeniedError
 from pydantic import Field
 
 from letta.constants import DEFAULT_EMBEDDING_CHUNK_SIZE, LLM_MAX_CONTEXT_WINDOW
-from letta.errors import ErrorCode, LLMAuthenticationError, LLMError
+from letta.errors import ErrorCode, LLMAuthenticationError, LLMError, LLMPermissionDeniedError
 from letta.log import get_logger
 from letta.schemas.embedding_config import EmbeddingConfig
 from letta.schemas.enums import ProviderCategory, ProviderType
@@ -38,6 +38,15 @@ class OpenAIProvider(Provider):
             await client.models.list()
         except AuthenticationError as e:
             raise LLMAuthenticationError(message=f"Failed to authenticate with OpenAI: {e}", code=ErrorCode.UNAUTHENTICATED)
+        except PermissionDeniedError as e:
+            raise LLMPermissionDeniedError(message=f"Permission denied by OpenAI: {e}", code=ErrorCode.PERMISSION_DENIED)
+        except AttributeError as e:
+            if "_set_private_attributes" in str(e):
+                raise LLMError(
+                    message=f"OpenAI-compatible endpoint at {self.base_url} returned an unexpected non-JSON response. Verify the base URL and that the endpoint is reachable.",
+                    code=ErrorCode.INTERNAL_SERVER_ERROR,
+                )
+            raise LLMError(message=f"{e}", code=ErrorCode.INTERNAL_SERVER_ERROR)
         except Exception as e:
             raise LLMError(message=f"{e}", code=ErrorCode.INTERNAL_SERVER_ERROR)
 

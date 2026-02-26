@@ -3,7 +3,6 @@ Integration tests for the Conversations API using the SDK.
 """
 
 import uuid
-from time import sleep
 
 import pytest
 import requests
@@ -568,6 +567,94 @@ class TestConversationsSDK:
         assert first_message_id not in [m.id for m in messages_after]
 
 
+class TestConversationDelete:
+    """Tests for the conversation delete endpoint."""
+
+    def test_delete_conversation(self, client: Letta, agent, server_url: str):
+        """Test soft deleting a conversation."""
+        # Create a conversation
+        conversation = client.conversations.create(agent_id=agent.id)
+        assert conversation.id is not None
+
+        # Delete it via REST endpoint
+        response = requests.delete(
+            f"{server_url}/v1/conversations/{conversation.id}",
+        )
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+
+        # Verify it's no longer accessible
+        response = requests.get(
+            f"{server_url}/v1/conversations/{conversation.id}",
+        )
+        assert response.status_code == 404, f"Expected 404 for deleted conversation, got {response.status_code}"
+
+    def test_delete_conversation_removes_from_list(self, client: Letta, agent, server_url: str):
+        """Test that deleted conversations don't appear in list."""
+        # Create two conversations
+        conv1 = client.conversations.create(agent_id=agent.id)
+        conv2 = client.conversations.create(agent_id=agent.id)
+
+        # Verify both appear in list
+        conversations = client.conversations.list(agent_id=agent.id)
+        conv_ids = [c.id for c in conversations]
+        assert conv1.id in conv_ids
+        assert conv2.id in conv_ids
+
+        # Delete one
+        response = requests.delete(
+            f"{server_url}/v1/conversations/{conv1.id}",
+        )
+        assert response.status_code == 200
+
+        # Verify only the non-deleted one appears in list
+        conversations = client.conversations.list(agent_id=agent.id)
+        conv_ids = [c.id for c in conversations]
+        assert conv1.id not in conv_ids, "Deleted conversation should not appear in list"
+        assert conv2.id in conv_ids, "Non-deleted conversation should still appear"
+
+    def test_delete_conversation_not_found(self, client: Letta, agent, server_url: str):
+        """Test that deleting a non-existent conversation returns 404."""
+        fake_id = "conv-00000000-0000-0000-0000-000000000000"
+        response = requests.delete(
+            f"{server_url}/v1/conversations/{fake_id}",
+        )
+        assert response.status_code == 404
+
+    def test_delete_conversation_double_delete(self, client: Letta, agent, server_url: str):
+        """Test that deleting an already-deleted conversation returns 404."""
+        # Create and delete a conversation
+        conversation = client.conversations.create(agent_id=agent.id)
+
+        # First delete should succeed
+        response = requests.delete(
+            f"{server_url}/v1/conversations/{conversation.id}",
+        )
+        assert response.status_code == 200
+
+        # Second delete should return 404
+        response = requests.delete(
+            f"{server_url}/v1/conversations/{conversation.id}",
+        )
+        assert response.status_code == 404, "Double delete should return 404"
+
+    def test_update_deleted_conversation_fails(self, client: Letta, agent, server_url: str):
+        """Test that updating a deleted conversation returns 404."""
+        # Create and delete a conversation
+        conversation = client.conversations.create(agent_id=agent.id)
+
+        response = requests.delete(
+            f"{server_url}/v1/conversations/{conversation.id}",
+        )
+        assert response.status_code == 200
+
+        # Try to update the deleted conversation
+        response = requests.patch(
+            f"{server_url}/v1/conversations/{conversation.id}",
+            json={"summary": "Updated summary"},
+        )
+        assert response.status_code == 404, "Updating deleted conversation should return 404"
+
+
 class TestConversationCompact:
     """Tests for the conversation compact (summarization) endpoint."""
 
@@ -616,6 +703,45 @@ class TestConversationCompact:
             order="asc",
         )
         assert len(compacted_messages) < initial_count
+
+    def test_compact_conversation_creates_summary_role_message(self, client: Letta, agent, server_url: str):
+        """Test that compaction creates a summary message with role='summary'."""
+        # Create a conversation
+        conversation = client.conversations.create(agent_id=agent.id)
+
+        # Send multiple messages to create a history worth summarizing
+        for i in range(5):
+            list(
+                client.conversations.messages.create(
+                    conversation_id=conversation.id,
+                    messages=[{"role": "user", "content": f"Message {i}: Tell me about topic {i}."}],
+                )
+            )
+
+        # Call compact endpoint with 'all' mode to ensure a single summary
+        response = requests.post(
+            f"{server_url}/v1/conversations/{conversation.id}/compact",
+            json={
+                "compaction_settings": {
+                    "mode": "all",
+                }
+            },
+        )
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+
+        # Get compacted messages
+        compacted_messages = client.conversations.messages.list(
+            conversation_id=conversation.id,
+            order="asc",
+        )
+
+        # After 'all' mode compaction, we expect: system message + summary message
+        # The summary message should have role='summary'
+        summary_messages = [msg for msg in compacted_messages if msg.role == "summary"]
+        assert len(summary_messages) == 1, (
+            f"Expected exactly 1 summary message after compaction, found {len(summary_messages)}. "
+            f"Message roles: {[msg.role for msg in compacted_messages]}"
+        )
 
     def test_compact_conversation_with_settings(self, client: Letta, agent, server_url: str):
         """Test conversation compaction with custom compaction settings."""

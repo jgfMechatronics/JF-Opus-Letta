@@ -492,7 +492,7 @@ def test_line_chunker_out_of_range_start():
     chunker = LineChunker()
 
     # Test with start beyond file length - should raise ValueError
-    with pytest.raises(ValueError, match="File test.py has only 3 lines, but requested offset 6 is out of range"):
+    with pytest.raises(ValueError, match=r"File test.py has only 3 lines, but requested offset 6 is out of range"):
         chunker.chunk_text(file, start=5, end=6, validate_range=True)
 
 
@@ -530,7 +530,7 @@ def test_line_chunker_edge_case_single_line():
     assert "1: only line" in result[1]
 
     # Test out of range for single line file - should raise error
-    with pytest.raises(ValueError, match="File single.py has only 1 lines, but requested offset 2 is out of range"):
+    with pytest.raises(ValueError, match=r"File single.py has only 1 lines, but requested offset 2 is out of range"):
         chunker.chunk_text(file, start=1, end=2, validate_range=True)
 
 
@@ -540,7 +540,7 @@ def test_line_chunker_validation_disabled_allows_out_of_range():
     chunker = LineChunker()
 
     # Test 1: Out of bounds start should always raise error, even with validation disabled
-    with pytest.raises(ValueError, match="File test.py has only 3 lines, but requested offset 6 is out of range"):
+    with pytest.raises(ValueError, match=r"File test.py has only 3 lines, but requested offset 6 is out of range"):
         chunker.chunk_text(file, start=5, end=10, validate_range=False)
 
     # Test 2: With validation disabled, start >= end should be allowed (but gives empty result)
@@ -561,7 +561,7 @@ def test_line_chunker_only_start_parameter():
     assert "3: line3" in result[2]
 
     # Test start at end of file - should raise error
-    with pytest.raises(ValueError, match="File test.py has only 3 lines, but requested offset 4 is out of range"):
+    with pytest.raises(ValueError, match=r"File test.py has only 3 lines, but requested offset 4 is out of range"):
         chunker.chunk_text(file, start=3, validate_range=True)
 
 
@@ -653,10 +653,10 @@ def test_validate_function_response_strict_mode_none():
 
 def test_validate_function_response_strict_mode_violation():
     """Test strict mode raises ValueError for non-string/None types"""
-    with pytest.raises(ValueError, match="Strict mode violation. Function returned type: int"):
+    with pytest.raises(ValueError, match=r"Strict mode violation. Function returned type: int"):
         validate_function_response(42, return_char_limit=100, strict=True)
 
-    with pytest.raises(ValueError, match="Strict mode violation. Function returned type: dict"):
+    with pytest.raises(ValueError, match=r"Strict mode violation. Function returned type: dict"):
         validate_function_response({"key": "value"}, return_char_limit=100, strict=True)
 
 

@@ -369,25 +369,17 @@ def initialize_message_sequence(
 
         # Some LMStudio models (e.g. meta-llama-3.1) require the user message before any tool calls
         if llm_config.provider_name == "lmstudio_openai":
-            messages = (
-                [
-                    {"role": "system", "content": full_system_message},
-                ]
-                + [
-                    {"role": "user", "content": first_user_message},
-                ]
-                + initial_boot_messages
-            )
+            messages = [
+                {"role": "system", "content": full_system_message},
+                {"role": "user", "content": first_user_message},
+                *initial_boot_messages,
+            ]
         else:
-            messages = (
-                [
-                    {"role": "system", "content": full_system_message},
-                ]
-                + initial_boot_messages
-                + [
-                    {"role": "user", "content": first_user_message},
-                ]
-            )
+            messages = [
+                {"role": "system", "content": full_system_message},
+                *initial_boot_messages,
+                {"role": "user", "content": first_user_message},
+            ]
 
     else:
         messages = [
@@ -442,25 +434,17 @@ async def initialize_message_sequence_async(
 
         # Some LMStudio models (e.g. meta-llama-3.1) require the user message before any tool calls
         if llm_config.provider_name == "lmstudio_openai":
-            messages = (
-                [
-                    {"role": "system", "content": full_system_message},
-                ]
-                + [
-                    {"role": "user", "content": first_user_message},
-                ]
-                + initial_boot_messages
-            )
+            messages = [
+                {"role": "system", "content": full_system_message},
+                {"role": "user", "content": first_user_message},
+                *initial_boot_messages,
+            ]
         else:
-            messages = (
-                [
-                    {"role": "system", "content": full_system_message},
-                ]
-                + initial_boot_messages
-                + [
-                    {"role": "user", "content": first_user_message},
-                ]
-            )
+            messages = [
+                {"role": "system", "content": full_system_message},
+                *initial_boot_messages,
+                {"role": "user", "content": first_user_message},
+            ]
 
     else:
         messages = [
@@ -822,7 +806,7 @@ def get_column_names_from_includes_params(
     include_relationships: Optional[List[str]] = None, includes: Optional[List[str]] = None
 ) -> Set[str]:
     include_mapping = {
-        "agent.blocks": ["core_memory", "file_agents"],
+        "agent.blocks": ["core_memory", "file_agents", "tags"],
         "agent.identities": ["identities"],
         "agent.managed_group": ["multi_agent_group"],
         "agent.secrets": ["tool_exec_environment_variables"],
@@ -830,7 +814,7 @@ def get_column_names_from_includes_params(
         "agent.tags": ["tags"],
         "agent.tools": ["tools"],
         # legacy
-        "memory": ["core_memory", "file_agents"],
+        "memory": ["core_memory", "file_agents", "tags"],
         "identity_ids": ["identities"],
         "multi_agent_group": ["multi_agent_group"],
         "tool_exec_environment_variables": ["tool_exec_environment_variables"],

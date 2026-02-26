@@ -25,6 +25,11 @@ class BaseAgentV2(ABC):
         self.actor = actor
         self.logger = get_logger(agent_state.id)
 
+    @property
+    def agent_id(self) -> str:
+        """Return the agent ID for backward compatibility with code expecting self.agent_id."""
+        return self.agent_state.id
+
     @abstractmethod
     async def build_request(
         self,
@@ -46,6 +51,7 @@ class BaseAgentV2(ABC):
         include_return_message_types: list[MessageType] | None = None,
         request_start_timestamp_ns: int | None = None,
         client_tools: list["ClientToolSchema"] | None = None,
+        include_compaction_messages: bool = False,  # Not used in V2, but accepted for API compatibility
     ) -> LettaResponse:
         """
         Execute the agent loop in blocking mode, returning all messages at once.
@@ -53,6 +59,7 @@ class BaseAgentV2(ABC):
         Args:
             client_tools: Optional list of client-side tools. When called, execution pauses
                 for client to provide tool returns.
+            include_compaction_messages: Not used in V2, but accepted for API compatibility.
         """
         raise NotImplementedError
 
@@ -66,8 +73,9 @@ class BaseAgentV2(ABC):
         use_assistant_message: bool = True,
         include_return_message_types: list[MessageType] | None = None,
         request_start_timestamp_ns: int | None = None,
- conversation_id: str | None = None,
+        conversation_id: str | None = None,
         client_tools: list["ClientToolSchema"] | None = None,
+        include_compaction_messages: bool = False,  # Not used in V2, but accepted for API compatibility
     ) -> AsyncGenerator[LettaMessage | LegacyLettaMessage | MessageStreamStatus, None]:
         """
         Execute the agent loop in streaming mode, yielding chunks as they become available.
@@ -78,5 +86,6 @@ class BaseAgentV2(ABC):
         Args:
             client_tools: Optional list of client-side tools. When called, execution pauses
                 for client to provide tool returns.
+            include_compaction_messages: Not used in V2, but accepted for API compatibility.
         """
         raise NotImplementedError

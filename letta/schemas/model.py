@@ -212,7 +212,7 @@ class ModelSettings(BaseModel):
 
     # model: str = Field(..., description="The name of the model.")
     max_output_tokens: int = Field(4096, description="The maximum number of tokens the model can generate.")
-    parallel_tool_calls: bool = Field(False, description="Whether to enable parallel tool calling.")
+    parallel_tool_calls: bool = Field(True, description="Whether to enable parallel tool calling.")
 
 
 class OpenAIReasoning(BaseModel):
@@ -374,12 +374,22 @@ class XAIModelSettings(ModelSettings):
         }
 
 
+class ZAIThinking(BaseModel):
+    """Thinking configuration for ZAI GLM-4.5+ models."""
+
+    type: Literal["enabled", "disabled"] = Field("enabled", description="Whether thinking is enabled or disabled.")
+    clear_thinking: bool = Field(False, description="If False, preserved thinking is used (recommended for agents).")
+
+
 class ZAIModelSettings(ModelSettings):
     """Z.ai (ZhipuAI) model configuration (OpenAI-compatible)."""
 
     provider_type: Literal[ProviderType.zai] = Field(ProviderType.zai, description="The type of the provider.")
     temperature: float = Field(0.7, description="The temperature of the model.")
     response_format: Optional[ResponseFormatUnion] = Field(None, description="The response format for the model.")
+    thinking: ZAIThinking = Field(
+        ZAIThinking(type="enabled", clear_thinking=False), description="The thinking configuration for GLM-4.5+ models."
+    )
 
     def _to_legacy_config_params(self) -> dict:
         return {
@@ -388,6 +398,7 @@ class ZAIModelSettings(ModelSettings):
             "response_format": self.response_format,
             "parallel_tool_calls": self.parallel_tool_calls,
             "strict": False,  # ZAI does not support strict mode
+            "extended_thinking": self.thinking.type == "enabled",
         }
 
 

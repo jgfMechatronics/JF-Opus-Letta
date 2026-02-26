@@ -223,3 +223,33 @@ def test_current_files_open_counts_truthy_only():
     m = Memory(agent_type=AgentType.react_agent, blocks=[], file_blocks=[fb1, fb2, fb3])
     out = m.compile(sources=[src], max_files_open=10)
     assert "- current_files_open=1" in out
+
+
+def test_compile_git_memory_filesystem_handles_leaf_directory_collisions():
+    """Git memory filesystem rendering should tolerate label prefix collisions.
+
+    Example collisions:
+    - leaf at "system" and children under "system/..."
+    - leaf at "system/human" and children under "system/human/..."
+
+    These occur naturally in git-backed memory where both index-like blocks and
+    nested blocks can exist.
+    """
+
+    m = Memory(
+        agent_type=AgentType.letta_v1_agent,
+        git_enabled=True,
+        blocks=[
+            Block(label="system", value="root", limit=100),
+            Block(label="system/human", value="human index", limit=100),
+            Block(label="system/human/context", value="context", limit=100),
+        ],
+    )
+
+    out = m.compile()
+
+    # Should include the filesystem view and not raise.
+    assert "<memory_filesystem>" in out
+    assert "system/" in out
+    assert "system.md" in out
+    assert "human.md" in out

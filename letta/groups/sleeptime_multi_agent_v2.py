@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 
@@ -213,7 +212,7 @@ class SleeptimeMultiAgentV2(BaseAgent):
                 group_id=self.group.id, last_processed_message_id=last_response_messages[-1].id, actor=self.actor
             )
             for sleeptime_agent_id in self.group.agent_ids:
-                run_id = await self._issue_background_task(
+                await self._issue_background_task(
                     sleeptime_agent_id,
                     last_response_messages,
                     last_processed_message_id,

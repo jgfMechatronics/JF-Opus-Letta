@@ -101,7 +101,7 @@ async def test_send_llm_batch_request_async_mismatched_keys(anthropic_client, mo
     a ValueError is raised.
     """
     mismatched_tools = {"agent-2": []}  # Different agent ID than in the messages mapping.
-    with pytest.raises(ValueError, match="Agent mappings for messages and tools must use the same agent_ids."):
+    with pytest.raises(ValueError, match=r"Agent mappings for messages and tools must use the same agent_ids."):
         await anthropic_client.send_llm_batch_request_async(
             AgentType.memgpt_agent, mock_agent_messages, mismatched_tools, mock_agent_llm_config
         )

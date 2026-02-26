@@ -73,6 +73,32 @@ class LettaRequest(BaseModel):
         "This allows sending a message to a different model without changing the agent's configuration.",
     )
 
+    # Compaction message format
+    include_compaction_messages: bool = Field(
+        default=False,
+        description="If True, compaction events emit structured `SummaryMessage` and `EventMessage` types. "
+        "If False (default), compaction messages are not included in the response.",
+    )
+
+    # Log probabilities for RL training
+    return_logprobs: bool = Field(
+        default=False,
+        description="If True, returns log probabilities of the output tokens in the response. "
+        "Useful for RL training. Only supported for OpenAI-compatible providers (including SGLang).",
+    )
+    top_logprobs: Optional[int] = Field(
+        default=None,
+        description="Number of most likely tokens to return at each position (0-20). "
+        "Requires return_logprobs=True.",
+    )
+    return_token_ids: bool = Field(
+        default=False,
+        description="If True, returns token IDs and logprobs for ALL LLM generations in the agent step, "
+        "not just the last one. Uses SGLang native /generate endpoint. "
+        "Returns 'turns' field with TurnTokenData for each assistant/tool turn. "
+        "Required for proper multi-turn RL training with loss masking.",
+    )
+
     @field_validator("messages", mode="before")
     @classmethod
     def add_default_type_to_messages(cls, v):

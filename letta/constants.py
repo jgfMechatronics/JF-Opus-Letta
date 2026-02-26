@@ -78,7 +78,7 @@ DEFAULT_CONTEXT_WINDOW = 32000
 
 # Summarization trigger threshold (multiplier of context_window limit)
 # Summarization triggers when step usage > context_window * SUMMARIZATION_TRIGGER_MULTIPLIER
-SUMMARIZATION_TRIGGER_MULTIPLIER = 1.0
+SUMMARIZATION_TRIGGER_MULTIPLIER = 0.9  # using instead of 1.0 to avoid "too many tokens in prompt" fallbacks
 
 # number of concurrent embedding requests to sent
 EMBEDDING_BATCH_SIZE = 200
@@ -252,8 +252,11 @@ LLM_MAX_CONTEXT_WINDOW = {
     "deepseek-chat": 64000,
     "deepseek-reasoner": 64000,
     # glm (Z.AI)
-    "glm-4.6": 200000,
     "glm-4.5": 128000,
+    "glm-4.6": 200000,
+    "glm-4.7": 200000,
+    "glm-5": 200000,
+    "glm-5-code": 200000,
     ## OpenAI models: https://platform.openai.com/docs/models/overview
     # gpt-5
     "gpt-5": 272000,
@@ -383,6 +386,7 @@ LLM_MAX_CONTEXT_WINDOW = {
     "gemini-2.5-computer-use-preview-10-2025": 1048576,
     # gemini 3
     "gemini-3-pro-preview": 1048576,
+    "gemini-3.1-pro-preview": 1048576,
     "gemini-3-flash-preview": 1048576,
     # gemini latest aliases
     "gemini-flash-latest": 1048576,
@@ -457,10 +461,18 @@ REDIS_RUN_ID_PREFIX = "agent:send_message:run_id"
 CONVERSATION_LOCK_PREFIX = "conversation:lock:"
 CONVERSATION_LOCK_TTL_SECONDS = 300  # 5 minutes
 
+# Memory repo locks - prevents concurrent modifications to git-based memory
+MEMORY_REPO_LOCK_PREFIX = "memory_repo:lock:"
+MEMORY_REPO_LOCK_TTL_SECONDS = 60  # 1 minute (git operations should be fast)
+
 # TODO: This is temporary, eventually use token-based eviction
 # File based controls
 DEFAULT_MAX_FILES_OPEN = 5
 DEFAULT_CORE_MEMORY_SOURCE_CHAR_LIMIT: int = 50000
+# Max values for file controls (int32 limit to match database INTEGER type)
+MAX_INT32: int = 2147483647
+MAX_PER_FILE_VIEW_WINDOW_CHAR_LIMIT: int = MAX_INT32
+MAX_FILES_OPEN_LIMIT: int = 1000  # Practical limit - no agent needs 1000+ files open
 
 GET_PROVIDERS_TIMEOUT_SECONDS = 10
 

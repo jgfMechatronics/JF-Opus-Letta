@@ -1,10 +1,20 @@
 import anthropic
 import httpx
+import openai
 import pytest
+from google.genai import errors as google_errors
 
 from letta.adapters.letta_llm_stream_adapter import LettaLLMStreamAdapter
-from letta.errors import ContextWindowExceededError, LLMConnectionError, LLMServerError
+from letta.errors import (
+    ContextWindowExceededError,
+    LLMBadRequestError,
+    LLMConnectionError,
+    LLMInsufficientCreditsError,
+    LLMServerError,
+)
 from letta.llm_api.anthropic_client import AnthropicClient
+from letta.llm_api.google_vertex_client import GoogleVertexClient
+from letta.schemas.enums import LLMCallType
 from letta.schemas.llm_config import LLMConfig
 
 
@@ -42,7 +52,7 @@ async def test_letta_llm_stream_adapter_converts_anthropic_streaming_api_status_
 
     llm_client = AnthropicClient()
     llm_config = LLMConfig(model="claude-sonnet-4-5-20250929", model_endpoint_type="anthropic", context_window=200000)
-    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config)
+    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config, call_type=LLMCallType.agent_step)
 
     gen = adapter.invoke_llm(request_data={}, messages=[], tools=[], use_assistant_message=True)
     with pytest.raises(LLMServerError):
@@ -83,7 +93,7 @@ async def test_letta_llm_stream_adapter_converts_anthropic_413_request_too_large
 
     llm_client = AnthropicClient()
     llm_config = LLMConfig(model="claude-sonnet-4-5-20250929", model_endpoint_type="anthropic", context_window=200000)
-    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config)
+    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config, call_type=LLMCallType.agent_step)
 
     gen = adapter.invoke_llm(request_data={}, messages=[], tools=[], use_assistant_message=True)
     with pytest.raises(ContextWindowExceededError):
@@ -117,7 +127,7 @@ async def test_letta_llm_stream_adapter_converts_httpx_read_error(monkeypatch):
 
     llm_client = AnthropicClient()
     llm_config = LLMConfig(model="claude-sonnet-4-5-20250929", model_endpoint_type="anthropic", context_window=200000)
-    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config)
+    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config, call_type=LLMCallType.agent_step)
 
     gen = adapter.invoke_llm(request_data={}, messages=[], tools=[], use_assistant_message=True)
     with pytest.raises(LLMConnectionError):
@@ -151,7 +161,7 @@ async def test_letta_llm_stream_adapter_converts_httpx_write_error(monkeypatch):
 
     llm_client = AnthropicClient()
     llm_config = LLMConfig(model="claude-sonnet-4-5-20250929", model_endpoint_type="anthropic", context_window=200000)
-    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config)
+    adapter = LettaLLMStreamAdapter(llm_client=llm_client, llm_config=llm_config, call_type=LLMCallType.agent_step)
 
     gen = adapter.invoke_llm(request_data={}, messages=[], tools=[], use_assistant_message=True)
     with pytest.raises(LLMConnectionError):
@@ -187,3 +197,93 @@ def test_anthropic_client_handle_llm_error_request_too_large_string():
 
     assert isinstance(result, ContextWindowExceededError)
     assert "request_too_large" in result.message.lower() or "context window exceeded" in result.message.lower()
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "The input token count exceeds the maximum number of tokens allowed 1048576.",
+        "Token count of 1500000 exceeds the model limit of 1048576 tokens allowed.",
+    ],
+    ids=["gemini-token-count-exceeds", "gemini-tokens-allowed-limit"],
+)
+def test_google_client_handle_llm_error_token_limit_returns_context_window_exceeded(error_message):
+    """Google 400 errors about token limits should map to ContextWindowExceededError."""
+    client = GoogleVertexClient.__new__(GoogleVertexClient)
+    response_json = {
+        "message": f'{{"error": {{"code": 400, "message": "{error_message}", "status": "INVALID_ARGUMENT"}}}}',
+        "status": "Bad Request",
+    }
+    error = google_errors.ClientError(400, response_json)
+    result = client.handle_llm_error(error)
+    assert isinstance(result, ContextWindowExceededError)
+
+
+def test_google_client_handle_llm_error_context_exceeded_returns_context_window_exceeded():
+    """Google 400 errors with 'context' + 'exceeded' should map to ContextWindowExceededError."""
+    client = GoogleVertexClient.__new__(GoogleVertexClient)
+    response_json = {
+        "message": '{"error": {"code": 400, "message": "Request context window exceeded the limit.", "status": "INVALID_ARGUMENT"}}',
+        "status": "Bad Request",
+    }
+    error = google_errors.ClientError(400, response_json)
+    result = client.handle_llm_error(error)
+    assert isinstance(result, ContextWindowExceededError)
+
+
+def test_google_client_handle_llm_error_generic_400_returns_bad_request():
+    """Google 400 errors without token/context keywords should map to LLMBadRequestError."""
+    client = GoogleVertexClient.__new__(GoogleVertexClient)
+    response_json = {
+        "message": '{"error": {"code": 400, "message": "Invalid argument: unsupported parameter.", "status": "INVALID_ARGUMENT"}}',
+        "status": "Bad Request",
+    }
+    error = google_errors.ClientError(400, response_json)
+    result = client.handle_llm_error(error)
+    assert isinstance(result, LLMBadRequestError)
+    assert not isinstance(result, ContextWindowExceededError)
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "Insufficient credits. Add more using https://openrouter.ai/settings/credits",
+        "This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 2679.",
+        "You exceeded your current quota, please check your plan and billing details.",
+    ],
+    ids=["openrouter-402", "openrouter-streaming-afford", "openai-quota-exceeded"],
+)
+def test_openai_client_handle_llm_error_insufficient_credits(error_message):
+    """Credit/quota errors should map to LLMInsufficientCreditsError."""
+    from letta.llm_api.openai_client import OpenAIClient
+
+    client = OpenAIClient()
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    error = openai.APIError(message=error_message, request=request, body=None)
+    result = client.handle_llm_error(error)
+    assert isinstance(result, LLMInsufficientCreditsError)
+
+
+def test_openai_client_handle_llm_error_402_status_code():
+    """402 APIStatusError should map to LLMInsufficientCreditsError."""
+    from letta.llm_api.openai_client import OpenAIClient
+
+    client = OpenAIClient()
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(status_code=402, request=request)
+    body = {"error": {"message": "Insufficient credits", "code": 402}}
+    error = openai.APIStatusError("Insufficient credits", response=response, body=body)
+    result = client.handle_llm_error(error)
+    assert isinstance(result, LLMInsufficientCreditsError)
+
+
+def test_openai_client_handle_llm_error_non_credit_api_error():
+    """Non-credit bare APIError should map to LLMBadRequestError, not LLMInsufficientCreditsError."""
+    from letta.llm_api.openai_client import OpenAIClient
+
+    client = OpenAIClient()
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    error = openai.APIError(message="Some other API error occurred", request=request, body=None)
+    result = client.handle_llm_error(error)
+    assert isinstance(result, LLMBadRequestError)
+    assert not isinstance(result, LLMInsufficientCreditsError)

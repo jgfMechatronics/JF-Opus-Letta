@@ -17,14 +17,13 @@ from letta.schemas.enums import RunStatus
 from letta.schemas.job import LettaRequestConfig
 from letta.schemas.letta_message import LettaMessageUnion
 from letta.schemas.letta_request import ConversationMessageRequest, LettaStreamingRequest, RetrieveStreamRequest
-from letta.schemas.letta_response import LettaResponse, LettaStreamingResponse
+from letta.schemas.letta_response import LettaResponse
 from letta.schemas.run import Run as PydanticRun
 from letta.server.rest_api.dependencies import HeaderParams, get_headers, get_letta_server
 from letta.server.rest_api.redis_stream_manager import redis_sse_stream_generator
 from letta.server.rest_api.streaming_response import (
     StreamingResponseWithStatusCode,
     add_keepalive_to_stream,
-    cancellation_aware_stream_wrapper,
 )
 from letta.server.server import SyncServer
 from letta.services.conversation_manager import ConversationManager
@@ -61,21 +60,30 @@ async def create_conversation(
 
 @router.get("/", response_model=List[Conversation], operation_id="list_conversations")
 async def list_conversations(
-    agent_id: str = Query(..., description="The agent ID to list conversations for"),
+    agent_id: Optional[str] = Query(
+        None, description="The agent ID to list conversations for (optional - returns all conversations if not provided)"
+    ),
     limit: int = Query(50, description="Maximum number of conversations to return"),
     after: Optional[str] = Query(None, description="Cursor for pagination (conversation ID)"),
     summary_search: Optional[str] = Query(None, description="Search for text within conversation summaries"),
+    order: Literal["asc", "desc"] = Query(
+        "desc", description="Sort order for conversations. 'asc' for oldest first, 'desc' for newest first"
+    ),
+    order_by: Literal["created_at", "last_run_completion"] = Query("created_at", description="Field to sort by"),
     server: SyncServer = Depends(get_letta_server),
     headers: HeaderParams = Depends(get_headers),
 ):
-    """List all conversations for an agent."""
+    """List all conversations for an agent (or all conversations if agent_id not provided)."""
     actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
+    ascending = order == "asc"
     return await conversation_manager.list_conversations(
         agent_id=agent_id,
         actor=actor,
         limit=limit,
         after=after,
         summary_search=summary_search,
+        ascending=ascending,
+        sort_by=order_by,
     )
 
 
@@ -105,6 +113,26 @@ async def update_conversation(
     return await conversation_manager.update_conversation(
         conversation_id=conversation_id,
         conversation_update=conversation_update,
+        actor=actor,
+    )
+
+
+@router.delete("/{conversation_id}", response_model=None, operation_id="delete_conversation")
+async def delete_conversation(
+    conversation_id: ConversationId,
+    server: SyncServer = Depends(get_letta_server),
+    headers: HeaderParams = Depends(get_headers),
+):
+    """
+    Delete a conversation (soft delete).
+
+    This marks the conversation as deleted but does not permanently remove it from the database.
+    The conversation will no longer appear in list operations.
+    Any isolated blocks associated with the conversation will be permanently deleted.
+    """
+    actor = await server.user_manager.get_actor_or_default_async(actor_id=headers.actor_id)
+    await conversation_manager.delete_conversation(
+        conversation_id=conversation_id,
         actor=actor,
     )
 
@@ -229,6 +257,17 @@ async def send_conversation_message(
         include_relationships=["memory", "multi_agent_group", "sources", "tool_exec_environment_variables", "tools", "tags"],
     )
 
+    # Apply conversation-level model override if set (lower priority than request override)
+    if conversation.model and not request.override_model:
+        conversation_llm_config = await server.get_llm_config_from_handle_async(
+            actor=actor,
+            handle=conversation.model,
+        )
+        if conversation.model_settings is not None:
+            update_params = conversation.model_settings._to_legacy_config_params()
+            conversation_llm_config = conversation_llm_config.model_copy(update=update_params)
+        agent = agent.model_copy(update={"llm_config": conversation_llm_config})
+
     if request.override_model:
         override_llm_config = await server.get_llm_config_from_handle_async(
             actor=actor,
@@ -265,6 +304,7 @@ async def send_conversation_message(
         include_return_message_types=request.include_return_message_types,
         client_tools=request.client_tools,
         conversation_id=conversation_id,
+        include_compaction_messages=request.include_compaction_messages,
     )
 
 
@@ -469,29 +509,6 @@ async def compact_conversation(
     # Get the agent state
     agent = await server.agent_manager.get_agent_by_id_async(conversation.agent_id, actor, include_relationships=["multi_agent_group"])
 
-    # Check eligibility
-    agent_eligible = agent.multi_agent_group is None or agent.multi_agent_group.manager_type in ["sleeptime", "voice_sleeptime"]
-    model_compatible = agent.llm_config.model_endpoint_type in [
-        "anthropic",
-        "openai",
-        "together",
-        "google_ai",
-        "google_vertex",
-        "bedrock",
-        "ollama",
-        "azure",
-        "xai",
-        "zai",
-        "groq",
-        "deepseek",
-    ]
-
-    if not (agent_eligible and model_compatible):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Summarization is not currently supported for this agent configuration. Please contact Letta support.",
-        )
-
     # Get in-context messages for this conversation
     in_context_messages = await conversation_manager.get_messages_for_conversation(
         conversation_id=conversation_id,
@@ -514,15 +531,19 @@ async def compact_conversation(
     summary_message, messages, summary = await agent_loop.compact(
         messages=in_context_messages,
         compaction_settings=compaction_settings,
+        use_summary_role=True,
     )
     num_messages_after = len(messages)
 
     # Validate compaction reduced messages
     if num_messages_before <= num_messages_after:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Summarization failed to reduce the number of messages. You may need to use a different CompactionSettings (e.g. using `all` mode).",
+        logger.warning(
+            f"Summarization failed to reduce the number of messages. {num_messages_before} messages -> {num_messages_after} (only expected if drop_tool_returns is True)."
         )
+        # raise HTTPException(
+        #     status_code=status.HTTP_400_BAD_REQUEST,
+        #     detail="Summarization failed to reduce the number of messages. You may need to use a different CompactionSettings (e.g. using `all` mode).",
+        # )
 
     # Checkpoint the messages (this will update the conversation_messages table)
     await agent_loop._checkpoint_messages(run_id=None, step_id=None, new_messages=[summary_message], in_context_messages=messages)
