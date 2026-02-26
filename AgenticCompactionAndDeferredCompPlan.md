@@ -167,18 +167,18 @@ if (not force) and (not system_prompt_changed) and (not memory_changed):
 **File:** `letta/agents/letta_agent_v2.py` (lines 803-810), `base_agent.py` (lines 134-140)  
 **Status:** Exists and correct. Runs only when `_refresh_messages` is called with `force=True` (post-compaction). Not the primary deferral mechanism — the guard in item 1 is.
 
-### 3. Remove explicit rebuilds from memory tools (THE KEY FIX)
+### 3. ~~Remove explicit rebuilds from memory tools~~ ✓ DONE (Opus, Feb 26)
 **File:** `letta/services/agent_manager.py`  
-- **Line 1733:** Remove `rebuild_system_prompt_async` call in `update_memory_if_changed_async`
-- NOTE at line 1730 already says "don't do this" — we're just finally doing what it says
+- ~~Line 1733: `rebuild_system_prompt_async` call in `update_memory_if_changed_async`~~ (deleted, along with stale NOTE comments above it)
 
 **File:** `letta/services/tool_executor/core_tool_executor.py`  
-- Remove 5 direct `rebuild_system_prompt_async` calls:
-  - Line 316 (after archival insert)
-  - Line 821 (after block description update)  
-  - Line 847 (after block label rename)
-  - Line 947 (after memory block value update)
-  - Line 1010 (after memory block value update)
+- ~~5 direct `rebuild_system_prompt_async` calls deleted:~~
+  - ~~Line 316 (after archival insert)~~
+  - ~~Line 820 (after block description update)~~
+  - ~~Line 845 (after block label rename)~~
+  - ~~Line 944 (after memory block value update)~~
+  - ~~Line 1005 (after memory block value update)~~
+- Verified: zero `rebuild_system_prompt` calls remain in core_tool_executor.py. Only legitimate calls remain in agent_manager.py.
 
 ### 4. ONE explicit rebuild in `evict_and_recompile`
 **Change:** Call `rebuild_system_prompt_async(force=True)` at end of eviction
