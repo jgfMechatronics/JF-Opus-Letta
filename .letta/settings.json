@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(python C:\\Git\\LettaTelegramLocal\\invoke_agent.py:*)"
+    ]
+  }
+}
