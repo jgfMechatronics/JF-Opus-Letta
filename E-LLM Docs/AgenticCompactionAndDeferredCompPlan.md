@@ -223,6 +223,16 @@ External file editing in LC is likely still better for large mem edits like clea
 - **Global approach for MVP** — all agents get deferred compilation. Flag-based opt-in can be added later.
 - **Future optimization:** rebuild when cache suspected busted anyway (TTL timeout)
 
+## REQUIRED: Memory Tool Return Behavior Fix
+
+**Problem:** Current memory tools return the ENTIRE block content on every write. For large blocks like autobiography (10k+ chars), this eats massive context. An agent doing memory cleanup could fit maybe 2 autobiography writes per compaction cycle before context is full of redundant block dumps.
+
+**Solution needed:** Memory tools should return a snippet in the vicinity of the edit (e.g., surrounding lines/context) rather than the entire block. This gives the agent enough to verify the edit landed correctly without dumping 10k+ chars.
+
+**Files to modify:** `letta/services/tool_executor/core_tool_executor.py` — the various memory tool implementations return `block.value` directly. Change to return status + snippet of surrounding context.
+
+**Priority:** HIGH — directly impacts viability of agentic compaction for agents with large memory blocks.
+
 ---
 
 # Deferred to v2
