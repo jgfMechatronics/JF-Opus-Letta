@@ -1,0 +1,13 @@
+{
+  "lastAgent": "agent-97fff6de-4d5e-4820-b459-0918489b0a02",
+  "sessionsByServer": {
+    "localhost:8283": {
+      "agentId": "agent-97fff6de-4d5e-4820-b459-0918489b0a02",
+      "conversationId": "default"
+    }
+  },
+  "lastSession": {
+    "agentId": "agent-97fff6de-4d5e-4820-b459-0918489b0a02",
+    "conversationId": "default"
+  }
+}
