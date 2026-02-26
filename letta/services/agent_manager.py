@@ -1727,11 +1727,6 @@ class AgentManager:
                 git_enabled=agent_state.memory.git_enabled,
             )
 
-            # NOTE: don't do this since re-buildin the memory is handled at the start of the step
-            # rebuild memory - this records the last edited timestamp of the memory
-            # TODO: pass in update timestamp from block edit time
-            await self.rebuild_system_prompt_async(agent_id=agent_id, actor=actor)
-
         return agent_state
 
     @enforce_types

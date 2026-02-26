@@ -313,7 +313,6 @@ class LettaCoreToolExecutor(ToolExecutor):
             actor=actor,
             tags=tags,
         )
-        await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
         return None
 
     async def core_memory_append(self, agent_state: AgentState, actor: User, label: str, content: str) -> str:
@@ -818,7 +817,6 @@ class LettaCoreToolExecutor(ToolExecutor):
             await self.block_manager.update_block_async(
                 block_id=memory_block.id, block_update=BlockUpdate(description=description), actor=actor
             )
-            await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
             return (
                 f"Successfully updated description of memory block '{label}'. "
@@ -844,7 +842,6 @@ class LettaCoreToolExecutor(ToolExecutor):
                 raise ValueError(f"Error: Memory block '{old_label}' does not exist")
 
             await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(label=new_label), actor=actor)
-            await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
             return (
                 f"Successfully renamed memory block '{old_label}' to '{new_label}'. "
@@ -944,8 +941,6 @@ class LettaCoreToolExecutor(ToolExecutor):
         # Keep in-memory AgentState consistent with DB
         agent_state.memory.update_block_value(label=label, value=new_value)
 
-        await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
-
         return new_value
 
     async def memory_str_insert(self, agent_state: AgentState, actor: User, path: str, insert_text: str, insert_line: int = -1) -> str:
@@ -1006,8 +1001,6 @@ class LettaCoreToolExecutor(ToolExecutor):
 
         # Keep in-memory AgentState consistent with DB
         agent_state.memory.update_block_value(label=label, value=new_value)
-
-        await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
         return new_value
 
