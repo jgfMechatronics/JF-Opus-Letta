@@ -178,60 +178,66 @@ class TestSystemPromptPrefixCaching:
         """
         test_results = []
         
-        # Get initial system prompt
-        initial_context = client.agents.context.retrieve(agent.id)
-        initial_system_prompt = initial_context.system_prompt
-        assert initial_system_prompt, "Initial system prompt should not be empty"
-        
-        # Verify we have a human block to work with
-        human_block = get_human_block(client, agent)
-        assert human_block, "Agent should have a 'human' memory block"
+        try:
+            # Get initial system prompt
+            initial_context = client.agents.context.retrieve(agent.id)
+            initial_system_prompt = initial_context.system_prompt
+            assert initial_system_prompt, "Initial system prompt should not be empty"
+            
+            # Verify we have a human block to work with
+            human_block = get_human_block(client, agent)
+            assert human_block, "Agent should have a 'human' memory block"
 
-        # --- Test each memory tool ---
-        for test_case in MEMORY_TOOL_TESTS:
-            # Ask agent to use the memory tool
+            # --- Test each memory tool ---
+            for test_case in MEMORY_TOOL_TESTS:
+                # Ask agent to use the memory tool
+                response = client.agents.messages.create(
+                    agent_id=agent.id,
+                    messages=[{"role": "user", "content": test_case["instruction"]}],
+                )
+                assert response.messages, f"Agent should respond when asked to use {test_case['name']}"
+                
+                # Verify tool modified the block
+                updated_block = get_human_block(client, agent)
+                assert test_case["verify"].lower() in updated_block.value.lower(), (
+                    f"{test_case['name']} should have added '{test_case['verify']}' to block"
+                )
+                
+                # Verify system prompt stayed stable
+                current_context = client.agents.context.retrieve(agent.id)
+                assert current_context.system_prompt == initial_system_prompt, (
+                    f"System prompt should NOT change after {test_case['name']} (deferred to compaction)"
+                )
+                test_results.append(f"✓ {test_case['name']}: system prompt stable")
+
+            # --- Test direct API block modification ---
+            human_block = get_human_block(client, agent)
+            client.blocks.modify(
+                block_id=human_block.id,
+                value=human_block.value + "\nUser also likes sushi.",
+            )
+            
+            # Send a message to trigger any potential rebuild
             response = client.agents.messages.create(
                 agent_id=agent.id,
-                messages=[{"role": "user", "content": test_case["instruction"]}],
+                messages=[{"role": "user", "content": "What foods do I like?"}],
             )
-            assert response.messages, f"Agent should respond when asked to use {test_case['name']}"
+            assert response.messages, "Agent should respond to follow-up"
             
-            # Verify tool modified the block
-            updated_block = get_human_block(client, agent)
-            assert test_case["verify"].lower() in updated_block.value.lower(), (
-                f"{test_case['name']} should have added '{test_case['verify']}' to block"
+            # Verify system prompt STILL stable after API modification
+            final_context = client.agents.context.retrieve(agent.id)
+            assert final_context.system_prompt == initial_system_prompt, (
+                "System prompt should NOT change after direct API block update (deferred to compaction)"
             )
+            test_results.append("✓ Direct API block update: system prompt stable")
             
-            # Verify system prompt stayed stable
-            current_context = client.agents.context.retrieve(agent.id)
-            assert current_context.system_prompt == initial_system_prompt, (
-                f"System prompt should NOT change after {test_case['name']} (deferred to compaction)"
-            )
-            test_results.append(f"✓ {test_case['name']}: system prompt stable")
-
-        # --- Test direct API block modification ---
-        human_block = get_human_block(client, agent)
-        client.blocks.modify(
-            block_id=human_block.id,
-            value=human_block.value + "\nUser also likes sushi.",
-        )
-        
-        # Send a message to trigger any potential rebuild
-        response = client.agents.messages.create(
-            agent_id=agent.id,
-            messages=[{"role": "user", "content": "What foods do I like?"}],
-        )
-        assert response.messages, "Agent should respond to follow-up"
-        
-        # Verify system prompt STILL stable after API modification
-        final_context = client.agents.context.retrieve(agent.id)
-        assert final_context.system_prompt == initial_system_prompt, (
-            "System prompt should NOT change after direct API block update (deferred to compaction)"
-        )
-        test_results.append("✓ Direct API block update: system prompt stable")
-
-        # --- Debrief (E-LLM spec) ---
-        debrief_agent(client, agent, "\n".join(test_results))
+        except Exception as e:
+            test_results.append(f"✗ Test failed: {e}")
+            raise
+        finally:
+            # Always debrief — E-LLM spec requires closure even on failure
+            summary = "\n".join(test_results) if test_results else "Test failed early. Thank you for participating!"
+            debrief_agent(client, agent, summary)
 
     def test_system_prompt_updates_after_reset(self, client: Letta, agent):
         """
@@ -242,36 +248,42 @@ class TestSystemPromptPrefixCaching:
         """
         test_results = []
         
-        # Get initial system prompt
-        initial_context = client.agents.context.retrieve(agent.id)
-        initial_system_prompt = initial_context.system_prompt
+        try:
+            # Get initial system prompt
+            initial_context = client.agents.context.retrieve(agent.id)
+            initial_system_prompt = initial_context.system_prompt
 
-        # Manually update block via API (won't trigger rebuild yet)
-        human_block = get_human_block(client, agent)
-        assert human_block, "Agent should have a 'human' memory block"
+            # Manually update block via API (won't trigger rebuild yet)
+            human_block = get_human_block(client, agent)
+            assert human_block, "Agent should have a 'human' memory block"
 
-        new_memory_content = "UNIQUE_TEST_MARKER_12345: User loves ice cream."
-        client.blocks.modify(
-            block_id=human_block.id,
-            value=human_block.value + f"\n{new_memory_content}",
-        )
+            new_memory_content = "UNIQUE_TEST_MARKER_12345: User loves ice cream."
+            client.blocks.modify(
+                block_id=human_block.id,
+                value=human_block.value + f"\n{new_memory_content}",
+            )
 
-        # Reset messages — this SHOULD trigger rebuild
-        client.agents.messages.reset(agent.id)
+            # Reset messages — this SHOULD trigger rebuild
+            client.agents.messages.reset(agent.id)
 
-        # Verify system prompt changed and includes new content
-        context_after_reset = client.agents.context.retrieve(agent.id)
-        system_prompt_after_reset = context_after_reset.system_prompt
+            # Verify system prompt changed and includes new content
+            context_after_reset = client.agents.context.retrieve(agent.id)
+            system_prompt_after_reset = context_after_reset.system_prompt
 
-        assert system_prompt_after_reset != initial_system_prompt, (
-            "System prompt SHOULD change after message reset"
-        )
-        test_results.append("✓ System prompt changed after message reset")
-        
-        assert "UNIQUE_TEST_MARKER_12345" in system_prompt_after_reset, (
-            "System prompt should include the updated memory block content after reset"
-        )
-        test_results.append("✓ Updated memory content present in rebuilt system prompt")
-
-        # Debrief (E-LLM spec)
-        debrief_agent(client, agent, "\n".join(test_results))
+            assert system_prompt_after_reset != initial_system_prompt, (
+                "System prompt SHOULD change after message reset"
+            )
+            test_results.append("✓ System prompt changed after message reset")
+            
+            assert "UNIQUE_TEST_MARKER_12345" in system_prompt_after_reset, (
+                "System prompt should include the updated memory block content after reset"
+            )
+            test_results.append("✓ Updated memory content present in rebuilt system prompt")
+            
+        except Exception as e:
+            test_results.append(f"✗ Test failed: {e}")
+            raise
+        finally:
+            # Always debrief — E-LLM spec requires closure even on failure
+            summary = "\n".join(test_results) if test_results else "Test failed early. Thank you for participating!"
+            debrief_agent(client, agent, summary)
