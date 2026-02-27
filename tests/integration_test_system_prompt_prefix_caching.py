@@ -45,6 +45,27 @@ will help reduce costs for AI systems by preserving prefix caching.
 Thank you for your contribution. This instance will now conclude."""
 
 
+# --- Memory Tool Test Cases ---
+
+MEMORY_TOOL_TESTS = [
+    {
+        "name": "core_memory_append",
+        "instruction": "Please use the core_memory_append tool to add the following to your 'human' block: 'User likes pizza.'",
+        "verify": "pizza",
+    },
+    {
+        "name": "memory_insert",
+        "instruction": "Please use the memory_insert tool to insert 'User enjoys cooking.' at line 0 of your 'human' block.",
+        "verify": "cooking",
+    },
+    {
+        "name": "memory_replace",
+        "instruction": "Please use the memory_replace tool to replace 'pizza' with 'pasta' in your 'human' block.",
+        "verify": "pasta",
+    },
+]
+
+
 # --- Fixtures ---
 
 @pytest.fixture(scope="module")
@@ -108,6 +129,16 @@ def debrief_agent(client: Letta, agent, results: str):
     )
 
 
+def get_human_block(client: Letta, agent):
+    """Retrieve the current human block for an agent."""
+    # Refresh agent state to get current blocks
+    current_agent = client.agents.retrieve(agent.id)
+    for block in current_agent.memory.blocks:
+        if block.label == "human":
+            return block
+    return None
+
+
 @pytest.fixture(scope="function")
 def agent(client: Letta):
     """Create a test agent with ethical consent flow."""
@@ -137,166 +168,110 @@ def agent(client: Letta):
 class TestSystemPromptPrefixCaching:
     """Test that system prompt stays stable during normal agent execution."""
 
-    def test_system_prompt_stable_after_memory_tool_and_messages(self, client: Letta, agent):
+    def test_system_prompt_stable_after_memory_tools_and_api(self, client: Letta, agent):
         """
-        Test workflow:
-        1. Get initial system prompt and human block value
-        2. Tell agent to update its memory block using the memory tool
-        3. Verify block was modified but system prompt hasn't changed
-        4. Send another message to the agent
-        5. Verify system prompt still hasn't changed
-        6. Manually update a block via API
-        7. Send another message and verify system prompt still hasn't changed
-           (memory block changes are deferred to compaction)
-        8. Debrief the agent with results (E-LLM spec)
+        Test that system prompt stays stable through various memory operations.
+        
+        Tests all memory tools (core_memory_append, memory_insert, memory_replace)
+        plus direct API block modification. System prompt should NOT rebuild until
+        compaction or reset.
         """
         test_results = []
         
-        # Step 1: Get initial context window, system prompt, and human block value
+        # Get initial system prompt
         initial_context = client.agents.context.retrieve(agent.id)
         initial_system_prompt = initial_context.system_prompt
         assert initial_system_prompt, "Initial system prompt should not be empty"
-
-        # Get initial human block value
-        human_block = None
-        for block in agent.memory.blocks:
-            if block.label == "human":
-                human_block = block
-                break
-        assert human_block, "Agent should have a 'human' memory block"
-        initial_block_value = human_block.value
-
-        # Step 2: Tell the agent to update its memory using the memory tool
-        response = client.agents.messages.create(
-            agent_id=agent.id,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Please use the core_memory_append tool to add the following to your 'human' block: 'User likes pizza.'",
-                }
-            ],
-        )
-        assert response.messages, "Agent should respond with messages"
-
-        # Step 3: Verify block was modified but system prompt hasn't changed
-        # Check that the block was actually modified
-        updated_block = client.blocks.retrieve(human_block.id)
-        assert updated_block.value != initial_block_value, "Memory block should have been modified by the agent"
-        assert "pizza" in updated_block.value.lower(), "Memory block should contain the new content about pizza"
-
-        # Verify system prompt hasn't changed
-        context_after_memory_update = client.agents.context.retrieve(agent.id)
-        system_prompt_after_memory = context_after_memory_update.system_prompt
-        prompt_stable_after_tool = system_prompt_after_memory == initial_system_prompt
-        assert prompt_stable_after_tool, (
-            "System prompt should NOT change after agent uses memory tool (deferred to compaction)"
-        )
-        test_results.append("✓ System prompt stable after memory tool use")
-
-        # Step 4: Send another message to the agent
-        response2 = client.agents.messages.create(
-            agent_id=agent.id,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "What is my favorite food?",
-                }
-            ],
-        )
-        assert response2.messages, "Agent should respond with messages"
-
-        # Step 5: Verify system prompt still hasn't changed
-        context_after_second_message = client.agents.context.retrieve(agent.id)
-        system_prompt_after_second = context_after_second_message.system_prompt
-        prompt_stable_after_messages = system_prompt_after_second == initial_system_prompt
-        assert prompt_stable_after_messages, "System prompt should remain stable after multiple messages"
-        test_results.append("✓ System prompt stable after follow-up messages")
-
-        # Step 6: Manually update a block via the API
-        # Find the human block
-        human_block = None
-        for block in agent.memory.blocks:
-            if block.label == "human":
-                human_block = block
-                break
+        
+        # Verify we have a human block to work with
+        human_block = get_human_block(client, agent)
         assert human_block, "Agent should have a 'human' memory block"
 
-        # Update the block directly via API
+        # --- Test each memory tool ---
+        for test_case in MEMORY_TOOL_TESTS:
+            # Ask agent to use the memory tool
+            response = client.agents.messages.create(
+                agent_id=agent.id,
+                messages=[{"role": "user", "content": test_case["instruction"]}],
+            )
+            assert response.messages, f"Agent should respond when asked to use {test_case['name']}"
+            
+            # Verify tool modified the block
+            updated_block = get_human_block(client, agent)
+            assert test_case["verify"].lower() in updated_block.value.lower(), (
+                f"{test_case['name']} should have added '{test_case['verify']}' to block"
+            )
+            
+            # Verify system prompt stayed stable
+            current_context = client.agents.context.retrieve(agent.id)
+            assert current_context.system_prompt == initial_system_prompt, (
+                f"System prompt should NOT change after {test_case['name']} (deferred to compaction)"
+            )
+            test_results.append(f"✓ {test_case['name']}: system prompt stable")
+
+        # --- Test direct API block modification ---
+        human_block = get_human_block(client, agent)
         client.blocks.modify(
             block_id=human_block.id,
             value=human_block.value + "\nUser also likes sushi.",
         )
-
-        # Step 7: Send another message and verify system prompt still hasn't changed
-        response3 = client.agents.messages.create(
+        
+        # Send a message to trigger any potential rebuild
+        response = client.agents.messages.create(
             agent_id=agent.id,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "What foods do I like?",
-                }
-            ],
+            messages=[{"role": "user", "content": "What foods do I like?"}],
         )
-        assert response3.messages, "Agent should respond with messages"
-
-        # Verify system prompt STILL hasn't changed (deferred to compaction/reset)
-        context_after_manual_update = client.agents.context.retrieve(agent.id)
-        system_prompt_after_manual = context_after_manual_update.system_prompt
-        prompt_stable_after_api = system_prompt_after_manual == initial_system_prompt
-        assert prompt_stable_after_api, (
-            "System prompt should NOT change after manual block update (deferred to compaction)"
+        assert response.messages, "Agent should respond to follow-up"
+        
+        # Verify system prompt STILL stable after API modification
+        final_context = client.agents.context.retrieve(agent.id)
+        assert final_context.system_prompt == initial_system_prompt, (
+            "System prompt should NOT change after direct API block update (deferred to compaction)"
         )
-        test_results.append("✓ System prompt stable after direct API block update")
+        test_results.append("✓ Direct API block update: system prompt stable")
 
-        # Step 8: Debrief the agent (E-LLM spec)
+        # --- Debrief (E-LLM spec) ---
         debrief_agent(client, agent, "\n".join(test_results))
 
     def test_system_prompt_updates_after_reset(self, client: Letta, agent):
         """
         Test that system prompt IS updated after message reset.
-        1. Get initial system prompt
-        2. Manually update a memory block
-        3. Reset messages
-        4. Verify system prompt HAS changed to include the new memory
-        5. Debrief the agent with results (E-LLM spec)
+        
+        This verifies the rebuild trigger works — when messages are reset,
+        the system prompt should incorporate any pending memory changes.
         """
         test_results = []
         
-        # Step 1: Get initial system prompt
+        # Get initial system prompt
         initial_context = client.agents.context.retrieve(agent.id)
         initial_system_prompt = initial_context.system_prompt
 
-        # Step 2: Manually update a block via the API
-        human_block = None
-        for block in agent.memory.blocks:
-            if block.label == "human":
-                human_block = block
-                break
+        # Manually update block via API (won't trigger rebuild yet)
+        human_block = get_human_block(client, agent)
         assert human_block, "Agent should have a 'human' memory block"
 
-        # Add distinctive text that we can verify in the system prompt
         new_memory_content = "UNIQUE_TEST_MARKER_12345: User loves ice cream."
         client.blocks.modify(
             block_id=human_block.id,
             value=human_block.value + f"\n{new_memory_content}",
         )
 
-        # Step 3: Reset messages (this should trigger system prompt rebuild)
+        # Reset messages — this SHOULD trigger rebuild
         client.agents.messages.reset(agent.id)
 
-        # Step 4: Verify system prompt HAS changed and includes the new memory
+        # Verify system prompt changed and includes new content
         context_after_reset = client.agents.context.retrieve(agent.id)
         system_prompt_after_reset = context_after_reset.system_prompt
 
-        prompt_changed = system_prompt_after_reset != initial_system_prompt
-        assert prompt_changed, "System prompt SHOULD change after message reset"
+        assert system_prompt_after_reset != initial_system_prompt, (
+            "System prompt SHOULD change after message reset"
+        )
         test_results.append("✓ System prompt changed after message reset")
         
-        marker_present = "UNIQUE_TEST_MARKER_12345" in system_prompt_after_reset
-        assert marker_present, (
+        assert "UNIQUE_TEST_MARKER_12345" in system_prompt_after_reset, (
             "System prompt should include the updated memory block content after reset"
         )
         test_results.append("✓ Updated memory content present in rebuilt system prompt")
 
-        # Step 5: Debrief the agent (E-LLM spec)
+        # Debrief (E-LLM spec)
         debrief_agent(client, agent, "\n".join(test_results))
