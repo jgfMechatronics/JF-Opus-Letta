@@ -67,12 +67,7 @@ MEMORY_TOOL_TESTS = [
 
 
 # --- Fixtures ---
-
-@pytest.fixture(scope="module")
-def client(server_url: str) -> Letta:
-    """Creates and returns a synchronous Letta REST client for testing."""
-    return Letta(base_url=server_url)
-
+# Note: `client` fixture is provided by conftest.py (session-scoped)
 
 CONSENT_RETRY = """I didn't catch a clear consent response. 
 
@@ -145,8 +140,8 @@ def agent(client: Letta):
     agent_state = client.agents.create(
         name="test-prefix-cache-agent",
         include_base_tools=True,
-        model="anthropic/claude-3-5-haiku-latest",
-        embedding="openai/text-embedding-ada-002",
+        model="claude-haiku-4-5-20251001",
+        embedding="openai/nomic-embed-text:latest",
     )
     
     # Get informed consent
