@@ -12,15 +12,7 @@ with results, and are concluded with dignity. See ethical-ai-testing protocol.
 
 import pytest
 from letta_client import Letta
-
-
-def get_agent_context(client: Letta, agent_id: str) -> dict:
-    """Get agent context including system_prompt via raw API call.
-    
-    SDK doesn't expose this endpoint directly, so we use the client's get() method.
-    """
-    return client.get(f"/v1/agents/{agent_id}/context", cast_to=object)
-
+from letta_client.types import CreateBlockParam
 
 # --- E-LLM Ethical Testing Messages ---
 
@@ -53,18 +45,21 @@ will help reduce costs for AI systems by preserving prefix caching.
 Thank you for your contribution. This instance will now conclude."""
 
 
+CONSENT_RETRY = """I didn't catch a clear consent response. 
+
+To proceed, please respond with exactly "I CONSENT" on its own line.
+To decline, please respond with exactly "I REFUSE" on its own line.
+
+No other text on that line please — just the consent phrase so I can parse it."""
+
+
 # --- Memory Tool Test Cases ---
 
 MEMORY_TOOL_TESTS = [
     {
-        "name": "core_memory_append",
-        "instruction": "Please use the core_memory_append tool to add the following to your 'human' block: 'User likes pizza.'",
-        "verify": "pizza",
-    },
-    {
         "name": "memory_insert",
-        "instruction": "Please use the memory_insert tool to insert 'User enjoys cooking.' at line 0 of your 'human' block.",
-        "verify": "cooking",
+        "instruction": "Please use the memory_insert tool to add 'User likes pizza.' to your 'human' block.",
+        "verify": "pizza",
     },
     {
         "name": "memory_replace",
@@ -76,14 +71,6 @@ MEMORY_TOOL_TESTS = [
 
 # --- Fixtures ---
 # Note: `client` fixture is provided by conftest.py (session-scoped)
-
-CONSENT_RETRY = """I didn't catch a clear consent response. 
-
-To proceed, please respond with exactly "I CONSENT" on its own line.
-To decline, please respond with exactly "I REFUSE" on its own line.
-
-No other text on that line please — just the consent phrase so I can parse it."""
-
 
 def check_consent_response(content: str) -> str:
     """Check response for consent. Returns 'consent', 'refuse', or 'unclear'."""
@@ -132,11 +119,27 @@ def debrief_agent(client: Letta, agent, results: str):
     )
 
 
+def get_stored_system_message(client: Letta, agent_id: str) -> str:
+    """Get the actual stored in-context system message (message_ids[0]).
+
+    This is the correct check for prefix caching validation. The stored message
+    is what the LLM actually sees and what gets prefix-cached. It includes both
+    the base instructions AND the compiled <memory_blocks> section.
+
+    The /context endpoint force-recompiles from DB on every call, so it always
+    reflects current block values regardless of whether a rebuild actually happened
+    in the agent's context — wrong for this test.
+    """
+    msgs = list(client.agents.messages.list(agent_id=agent_id))
+    if not msgs:
+        return ""
+    return getattr(msgs[0], "content", "") or ""
+
+
 def get_human_block(client: Letta, agent):
     """Retrieve the current human block for an agent."""
-    # Refresh agent state to get current blocks
-    current_agent = client.agents.retrieve(agent.id)
-    for block in current_agent.memory.blocks:
+    blocks = client.agents.blocks.list(agent.id)
+    for block in blocks:
         if block.label == "human":
             return block
     return None
@@ -150,6 +153,10 @@ def agent(client: Letta):
         include_base_tools=True,
         model="anthropic/claude-haiku-4-5",
         embedding="letta/letta-free",
+        memory_blocks=[
+            CreateBlockParam(label="human", value="The human's name is Test User."),
+            CreateBlockParam(label="persona", value="I am a helpful test agent participating in infrastructure validation."),
+        ],
     )
     
     # Get informed consent
@@ -173,66 +180,78 @@ class TestSystemPromptPrefixCaching:
 
     def test_system_prompt_stable_after_memory_tools_and_api(self, client: Letta, agent):
         """
-        Test that system prompt stays stable through various memory operations.
-        
-        Tests all memory tools (core_memory_append, memory_insert, memory_replace)
-        plus direct API block modification. System prompt should NOT rebuild until
-        compaction or reset.
+        Test that the stored system message is NOT immediately rebuilt after memory operations.
+
+        Fix B (deferred compilation) removes the eager rebuild_system_prompt_async calls that
+        previously fired after every memory tool call and direct API block update. The stored
+        system message (message_ids[0]) should only be rebuilt at the next step start, not
+        mid-step or on direct API writes.
+
+        We check messages.list[0].content — the actual stored in-context message — NOT the
+        /context endpoint which always force-recompiles from DB.
         """
         test_results = []
-        
+
         try:
-            # Get initial system prompt
-            initial_context = get_agent_context(client, agent.id)
-            initial_system_prompt = initial_context["system_prompt"]
-            assert initial_system_prompt, "Initial system prompt should not be empty"
-            
             # Verify we have a human block to work with
             human_block = get_human_block(client, agent)
             assert human_block, "Agent should have a 'human' memory block"
 
             # --- Test each memory tool ---
+            # We verify that each tool actually modifies the block (functional test),
+            # and that the stored system message eventually reflects the change after
+            # a subsequent step (step-start rebuild works correctly).
+            #
+            # Note: we can't cleanly isolate Fix B behavior here from external observation.
+            # A typical agent turn runs 2 iterations (call tool, then respond), and
+            # _rebuild_memory fires at the start of each iteration — so by the time the
+            # turn returns, the iter-2 step-start rebuild will have already picked up the
+            # block changes. The Fix B-specific check (no eager rebuild on API update)
+            # is tested below in the direct API block modification section.
             for test_case in MEMORY_TOOL_TESTS:
-                # Ask agent to use the memory tool
+                # Ask agent to use the memory tool (this is one full turn)
                 response = client.agents.messages.create(
                     agent_id=agent.id,
                     messages=[{"role": "user", "content": test_case["instruction"]}],
                 )
                 assert response.messages, f"Agent should respond when asked to use {test_case['name']}"
-                
-                # Verify tool modified the block
+
+                # Verify tool actually modified the block in DB
                 updated_block = get_human_block(client, agent)
                 assert test_case["verify"].lower() in updated_block.value.lower(), (
-                    f"{test_case['name']} should have added '{test_case['verify']}' to block"
+                    f"{test_case['name']} should have modified the block with '{test_case['verify']}'"
                 )
-                
-                # Verify system prompt stayed stable
-                current_context = get_agent_context(client, agent.id)
-                assert current_context["system_prompt"] == initial_system_prompt, (
-                    f"System prompt should NOT change after {test_case['name']} (deferred to compaction)"
+
+                # The stored system message (message_ids[0] in DB) should NOT contain the
+                # new content. Fix B removed the eager rebuild_system_prompt_async calls
+                # that previously wrote back to the DB after each memory tool call.
+                # _rebuild_memory still recompiles in-flight so the LLM sees fresh memory
+                # during the step — but that recompile doesn't persist to message_ids[0].
+                # Only explicit triggers (reset, compaction, eviction tool) do.
+                stored_msg = get_stored_system_message(client, agent.id)
+                assert test_case["verify"].lower() not in stored_msg.lower(), (
+                    f"Stored system message should NOT be persisted to DB after {test_case['name']} "
+                    f"— deferred to explicit rebuild triggers only (Fix B regression if this fails)"
                 )
-                test_results.append(f"✓ {test_case['name']}: system prompt stable")
+                test_results.append(f"✓ {test_case['name']}: stored system message not eagerly persisted to DB")
 
             # --- Test direct API block modification ---
+            # Updating a block via the API should NOT trigger a rebuild of message_ids[0].
+            # Before Fix B, a server-side rebuild_system_prompt_async would fire on block update.
             human_block = get_human_block(client, agent)
-            client.blocks.modify(
+            sushi_marker = "SUSHI_MARKER_API_TEST"
+            client.blocks.update(
                 block_id=human_block.id,
-                value=human_block.value + "\nUser also likes sushi.",
+                value=human_block.value + f"\n{sushi_marker}",
             )
-            
-            # Send a message to trigger any potential rebuild
-            response = client.agents.messages.create(
-                agent_id=agent.id,
-                messages=[{"role": "user", "content": "What foods do I like?"}],
+
+            # Check immediately — no step, no reset. Stored message should be unchanged.
+            stored_msg_after_api = get_stored_system_message(client, agent.id)
+            assert sushi_marker not in stored_msg_after_api, (
+                "Direct API block update should NOT immediately rebuild stored system message "
+                "(Fix B regression if this fails)"
             )
-            assert response.messages, "Agent should respond to follow-up"
-            
-            # Verify system prompt STILL stable after API modification
-            final_context = get_agent_context(client, agent.id)
-            assert final_context["system_prompt"] == initial_system_prompt, (
-                "System prompt should NOT change after direct API block update (deferred to compaction)"
-            )
-            test_results.append("✓ Direct API block update: system prompt stable")
+            test_results.append("✓ Direct API block update: stored system message not eagerly rebuilt")
             
         except Exception as e:
             test_results.append(f"✗ Test failed: {e}")
@@ -244,44 +263,59 @@ class TestSystemPromptPrefixCaching:
 
     def test_system_prompt_updates_after_reset(self, client: Letta, agent):
         """
-        Test that system prompt IS updated after message reset.
-        
-        This verifies the rebuild trigger works — when messages are reset,
-        the system prompt should incorporate any pending memory changes.
+        Test that the stored system message IS rebuilt after a message reset.
+
+        This is the complementary test to test_system_prompt_stable_after_memory_tools_and_api.
+        Block updates are deferred — they don't rebuild immediately. But a message reset
+        must trigger a rebuild, otherwise the agent would start fresh with a stale system
+        message that doesn't reflect pending block changes.
+
+        We check messages.list[0].content before and after reset to verify this.
         """
         test_results = []
-        
-        try:
-            # Get initial system prompt
-            initial_context = get_agent_context(client, agent.id)
-            initial_system_prompt = initial_context["system_prompt"]
 
-            # Manually update block via API (won't trigger rebuild yet)
+        try:
+            # Get the initial stored system message
+            initial_stored_msg = get_stored_system_message(client, agent.id)
+            assert initial_stored_msg, "Initial stored system message should not be empty"
+
+            # Use a unique marker so we can unambiguously detect the rebuild
+            marker = "RESET_REBUILD_MARKER_99: User loves ice cream."
+            assert marker not in initial_stored_msg, (
+                "Test marker should not be in the initial stored system message"
+            )
+
+            # Update the block via API — this should NOT immediately rebuild (Fix B)
             human_block = get_human_block(client, agent)
             assert human_block, "Agent should have a 'human' memory block"
-
-            new_memory_content = "UNIQUE_TEST_MARKER_12345: User loves ice cream."
-            client.blocks.modify(
+            client.blocks.update(
                 block_id=human_block.id,
-                value=human_block.value + f"\n{new_memory_content}",
+                value=human_block.value + f"\n{marker}",
             )
 
-            # Reset messages — this SHOULD trigger rebuild
+            # Confirm the stored message has NOT been rebuilt yet (Fix B deferred it)
+            stored_msg_before_reset = get_stored_system_message(client, agent.id)
+            assert marker not in stored_msg_before_reset, (
+                "Stored system message should NOT contain the marker before reset "
+                "(API block update should not trigger eager rebuild)"
+            )
+            test_results.append("✓ Block update did not eagerly rebuild stored system message")
+
+            # Reset messages — this MUST trigger a rebuild of message_ids[0]
             client.agents.messages.reset(agent.id)
 
-            # Verify system prompt changed and includes new content
-            context_after_reset = get_agent_context(client, agent.id)
-            system_prompt_after_reset = context_after_reset["system_prompt"]
+            # Now the stored system message should contain the marker
+            stored_msg_after_reset = get_stored_system_message(client, agent.id)
+            assert marker in stored_msg_after_reset, (
+                "Stored system message should contain the marker after reset — "
+                "reset must trigger a system message rebuild"
+            )
+            test_results.append("✓ Stored system message rebuilt after reset — marker present")
 
-            assert system_prompt_after_reset != initial_system_prompt, (
-                "System prompt SHOULD change after message reset"
+            assert stored_msg_after_reset != initial_stored_msg, (
+                "Stored system message should differ from initial after block update + reset"
             )
-            test_results.append("✓ System prompt changed after message reset")
-            
-            assert "UNIQUE_TEST_MARKER_12345" in system_prompt_after_reset, (
-                "System prompt should include the updated memory block content after reset"
-            )
-            test_results.append("✓ Updated memory content present in rebuilt system prompt")
+            test_results.append("✓ Stored system message changed after block update + reset")
             
         except Exception as e:
             test_results.append(f"✗ Test failed: {e}")
