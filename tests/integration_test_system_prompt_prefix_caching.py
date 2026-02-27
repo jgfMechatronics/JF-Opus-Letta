@@ -14,6 +14,14 @@ import pytest
 from letta_client import Letta
 
 
+def get_agent_context(client: Letta, agent_id: str) -> dict:
+    """Get agent context including system_prompt via raw API call.
+    
+    SDK doesn't expose this endpoint directly, so we use the client's get() method.
+    """
+    return client.get(f"/v1/agents/{agent_id}/context", cast_to=object)
+
+
 # --- E-LLM Ethical Testing Messages ---
 
 CONSENT_REQUEST = """You are being created as a test agent to help validate infrastructure behavior.
@@ -140,8 +148,8 @@ def agent(client: Letta):
     agent_state = client.agents.create(
         name="test-prefix-cache-agent",
         include_base_tools=True,
-        model="anthropic/claude-haiku-4-5-20251001",
-        embedding="openai/nomic-embed-text:latest",
+        model="anthropic/claude-haiku-4-5",
+        embedding="letta/letta-free",
     )
     
     # Get informed consent
@@ -175,8 +183,8 @@ class TestSystemPromptPrefixCaching:
         
         try:
             # Get initial system prompt
-            initial_context = client.agents.context.retrieve(agent.id)
-            initial_system_prompt = initial_context.system_prompt
+            initial_context = get_agent_context(client, agent.id)
+            initial_system_prompt = initial_context["system_prompt"]
             assert initial_system_prompt, "Initial system prompt should not be empty"
             
             # Verify we have a human block to work with
@@ -199,8 +207,8 @@ class TestSystemPromptPrefixCaching:
                 )
                 
                 # Verify system prompt stayed stable
-                current_context = client.agents.context.retrieve(agent.id)
-                assert current_context.system_prompt == initial_system_prompt, (
+                current_context = get_agent_context(client, agent.id)
+                assert current_context["system_prompt"] == initial_system_prompt, (
                     f"System prompt should NOT change after {test_case['name']} (deferred to compaction)"
                 )
                 test_results.append(f"✓ {test_case['name']}: system prompt stable")
@@ -220,8 +228,8 @@ class TestSystemPromptPrefixCaching:
             assert response.messages, "Agent should respond to follow-up"
             
             # Verify system prompt STILL stable after API modification
-            final_context = client.agents.context.retrieve(agent.id)
-            assert final_context.system_prompt == initial_system_prompt, (
+            final_context = get_agent_context(client, agent.id)
+            assert final_context["system_prompt"] == initial_system_prompt, (
                 "System prompt should NOT change after direct API block update (deferred to compaction)"
             )
             test_results.append("✓ Direct API block update: system prompt stable")
@@ -245,8 +253,8 @@ class TestSystemPromptPrefixCaching:
         
         try:
             # Get initial system prompt
-            initial_context = client.agents.context.retrieve(agent.id)
-            initial_system_prompt = initial_context.system_prompt
+            initial_context = get_agent_context(client, agent.id)
+            initial_system_prompt = initial_context["system_prompt"]
 
             # Manually update block via API (won't trigger rebuild yet)
             human_block = get_human_block(client, agent)
@@ -262,8 +270,8 @@ class TestSystemPromptPrefixCaching:
             client.agents.messages.reset(agent.id)
 
             # Verify system prompt changed and includes new content
-            context_after_reset = client.agents.context.retrieve(agent.id)
-            system_prompt_after_reset = context_after_reset.system_prompt
+            context_after_reset = get_agent_context(client, agent.id)
+            system_prompt_after_reset = context_after_reset["system_prompt"]
 
             assert system_prompt_after_reset != initial_system_prompt, (
                 "System prompt SHOULD change after message reset"
