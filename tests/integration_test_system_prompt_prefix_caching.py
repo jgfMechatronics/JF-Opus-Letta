@@ -182,13 +182,9 @@ class TestSystemPromptPrefixCaching:
         """
         Test that the stored system message is NOT immediately rebuilt after memory operations.
 
-        Fix B (deferred compilation) removes the eager rebuild_system_prompt_async calls that
-        previously fired after every memory tool call and direct API block update. The stored
-        system message (message_ids[0]) should only be rebuilt at the next step start, not
-        mid-step or on direct API writes.
-
-        We check messages.list[0].content — the actual stored in-context message — NOT the
-        /context endpoint which always force-recompiles from DB.
+        The stored system message should only update on explicit triggers (reset, compaction) —
+        not after memory tool calls or direct API block updates. This preserves prefix cache
+        stability across steps.
         """
         test_results = []
 
@@ -198,46 +194,26 @@ class TestSystemPromptPrefixCaching:
             assert human_block, "Agent should have a 'human' memory block"
 
             # --- Test each memory tool ---
-            # We verify that each tool actually modifies the block (functional test),
-            # and that the stored system message eventually reflects the change after
-            # a subsequent step (step-start rebuild works correctly).
-            #
-            # Note: we can't cleanly isolate Fix B behavior here from external observation.
-            # A typical agent turn runs 2 iterations (call tool, then respond), and
-            # _rebuild_memory fires at the start of each iteration — so by the time the
-            # turn returns, the iter-2 step-start rebuild will have already picked up the
-            # block changes. The Fix B-specific check (no eager rebuild on API update)
-            # is tested below in the direct API block modification section.
             for test_case in MEMORY_TOOL_TESTS:
-                # Ask agent to use the memory tool (this is one full turn)
                 response = client.agents.messages.create(
                     agent_id=agent.id,
                     messages=[{"role": "user", "content": test_case["instruction"]}],
                 )
                 assert response.messages, f"Agent should respond when asked to use {test_case['name']}"
 
-                # Verify tool actually modified the block in DB
                 updated_block = get_human_block(client, agent)
                 assert test_case["verify"].lower() in updated_block.value.lower(), (
                     f"{test_case['name']} should have modified the block with '{test_case['verify']}'"
                 )
 
-                # The stored system message (message_ids[0] in DB) should NOT contain the
-                # new content. Fix B removed the eager rebuild_system_prompt_async calls
-                # that previously wrote back to the DB after each memory tool call.
-                # _rebuild_memory still recompiles in-flight so the LLM sees fresh memory
-                # during the step — but that recompile doesn't persist to message_ids[0].
-                # Only explicit triggers (reset, compaction, eviction tool) do.
+                # Stored system message should not reflect the change yet — deferred to next explicit rebuild
                 stored_msg = get_stored_system_message(client, agent.id)
                 assert test_case["verify"].lower() not in stored_msg.lower(), (
-                    f"Stored system message should NOT be persisted to DB after {test_case['name']} "
-                    f"— deferred to explicit rebuild triggers only (Fix B regression if this fails)"
+                    f"Stored system message should NOT immediately reflect {test_case['name']} changes"
                 )
-                test_results.append(f"✓ {test_case['name']}: stored system message not eagerly persisted to DB")
+                test_results.append(f"✓ {test_case['name']}: stored system message stable")
 
             # --- Test direct API block modification ---
-            # Updating a block via the API should NOT trigger a rebuild of message_ids[0].
-            # Before Fix B, a server-side rebuild_system_prompt_async would fire on block update.
             human_block = get_human_block(client, agent)
             sushi_marker = "SUSHI_MARKER_API_TEST"
             client.blocks.update(
@@ -245,13 +221,12 @@ class TestSystemPromptPrefixCaching:
                 value=human_block.value + f"\n{sushi_marker}",
             )
 
-            # Check immediately — no step, no reset. Stored message should be unchanged.
+            # No step, no reset — stored message should be unchanged
             stored_msg_after_api = get_stored_system_message(client, agent.id)
             assert sushi_marker not in stored_msg_after_api, (
-                "Direct API block update should NOT immediately rebuild stored system message "
-                "(Fix B regression if this fails)"
+                "Direct API block update should NOT immediately rebuild stored system message"
             )
-            test_results.append("✓ Direct API block update: stored system message not eagerly rebuilt")
+            test_results.append("✓ Direct API block update: stored system message stable")
             
         except Exception as e:
             test_results.append(f"✗ Test failed: {e}")
@@ -285,7 +260,7 @@ class TestSystemPromptPrefixCaching:
                 "Test marker should not be in the initial stored system message"
             )
 
-            # Update the block via API — this should NOT immediately rebuild (Fix B)
+            # Update the block via API — this should NOT immediately rebuild
             human_block = get_human_block(client, agent)
             assert human_block, "Agent should have a 'human' memory block"
             client.blocks.update(
@@ -293,7 +268,6 @@ class TestSystemPromptPrefixCaching:
                 value=human_block.value + f"\n{marker}",
             )
 
-            # Confirm the stored message has NOT been rebuilt yet (Fix B deferred it)
             stored_msg_before_reset = get_stored_system_message(client, agent.id)
             assert marker not in stored_msg_before_reset, (
                 "Stored system message should NOT contain the marker before reset "
@@ -301,7 +275,7 @@ class TestSystemPromptPrefixCaching:
             )
             test_results.append("✓ Block update did not eagerly rebuild stored system message")
 
-            # Reset messages — this MUST trigger a rebuild of message_ids[0]
+            # this MUST trigger a rebuild of message_ids[0]
             client.agents.messages.reset(agent.id)
 
             # Now the stored system message should contain the marker
@@ -316,6 +290,8 @@ class TestSystemPromptPrefixCaching:
                 "Stored system message should differ from initial after block update + reset"
             )
             test_results.append("✓ Stored system message changed after block update + reset")
+
+            # TODO: Check that compaction also triggers rebuild
             
         except Exception as e:
             test_results.append(f"✗ Test failed: {e}")
