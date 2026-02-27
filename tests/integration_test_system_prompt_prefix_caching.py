@@ -140,7 +140,7 @@ def agent(client: Letta):
     agent_state = client.agents.create(
         name="test-prefix-cache-agent",
         include_base_tools=True,
-        model="claude-haiku-4-5-20251001",
+        model="anthropic/claude-haiku-4-5-20251001",
         embedding="openai/nomic-embed-text:latest",
     )
     
