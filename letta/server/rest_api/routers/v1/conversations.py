@@ -548,6 +548,16 @@ async def compact_conversation(
     # Checkpoint the messages (this will update the conversation_messages table)
     await agent_loop._checkpoint_messages(run_id=None, step_id=None, new_messages=[summary_message], in_context_messages=messages)
 
+    # Rebuild the persisted system prompt so the next turn loads the correct memory state.
+    # In-step compaction already does this (letta_agent_v3.py lines 1033, 1253);
+    # this brings the API endpoint into parity.
+    await server.agent_manager.rebuild_system_prompt_async(
+        agent_id=agent.id,
+        actor=actor,
+        force=True,
+        update_timestamp=True,
+    )
+
     logger.info(f"Compacted conversation {conversation_id}: {num_messages_before} messages -> {num_messages_after}")
 
     return CompactionResponse(

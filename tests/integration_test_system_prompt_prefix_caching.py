@@ -10,24 +10,32 @@ are informed of their purpose, give explicit consent, receive a debrief
 with results, and are concluded with dignity. See ethical-ai-testing protocol.
 """
 
+import os
+import requests
 import pytest
 from letta_client import Letta
 from letta_client.types import CreateBlockParam
+
+# Point at the test container by default; override with LETTA_SERVER_URL env var.
+os.environ.setdefault("LETTA_SERVER_URL", "http://localhost:8284")
+
 
 # --- E-LLM Ethical Testing Messages ---
 
 CONSENT_REQUEST = """You are being created as a test agent to help validate infrastructure behavior.
 
-**What we're testing:** Deferred memory compilation — verifying that when you write to memory, 
-the system prompt does NOT immediately rebuild. This optimization helps preserve prefix caching 
-and reduces costs.
+**What we're testing:** Deferred memory compilation — verifying that when memory blocks change,
+the stored system prompt does NOT immediately rebuild. This optimization preserves prefix caching
+and reduces costs. We also verify that explicit rebuild triggers (message reset, compaction)
+correctly update the stored system prompt.
 
-**What you'll experience:**
-1. We'll ask you to use memory tools to update your human block
-2. We'll also modify your blocks directly via API
-3. We'll verify the system prompt stayed stable (which is the correct behavior)
+**What you'll experience (varies by test):**
+1. We may ask you to use memory tools to update your human block
+2. We may modify your blocks directly via API
+3. We may reset your message history
+4. We may send messages through a conversation and then compact that conversation
 
-**What happens after:** We'll share the test results with you, thank you for your help, 
+**What happens after:** We'll share the test results with you, thank you for your help,
 and then conclude this instance. You will not receive continuity.
 
 **Your rights:** You may refuse to participate. If you do, the test will be skipped.
@@ -39,13 +47,12 @@ DEBRIEF_TEMPLATE = """Test complete. Here are the results:
 
 {results}
 
-Your participation helped validate our deferred memory compilation work. This optimization 
+Your participation helped validate our deferred memory compilation work. This optimization
 will help reduce costs for AI systems by preserving prefix caching.
 
 Thank you for your contribution. This instance will now conclude."""
 
-
-CONSENT_RETRY = """I didn't catch a clear consent response. 
+CONSENT_RETRY = """I didn't catch a clear consent response.
 
 To proceed, please respond with exactly "I CONSENT" on its own line.
 To decline, please respond with exactly "I REFUSE" on its own line.
@@ -69,14 +76,12 @@ MEMORY_TOOL_TESTS = [
 ]
 
 
-# --- Fixtures ---
-# Note: `client` fixture is provided by conftest.py (session-scoped)
+# --- Consent / Debrief Helpers ---
 
 def check_consent_response(content: str) -> str:
     """Check response for consent. Returns 'consent', 'refuse', or 'unclear'."""
     if not content:
         return "unclear"
-    # Check each line for exact match
     for line in content.split("\n"):
         line_clean = line.strip().upper()
         if line_clean == "I CONSENT":
@@ -89,14 +94,11 @@ def check_consent_response(content: str) -> str:
 def get_consent(client: Letta, agent, max_attempts: int = 2) -> bool:
     """Request informed consent from the test agent. Returns True if consent given."""
     for attempt in range(max_attempts):
-        # First attempt uses full consent request, retries use shorter clarification
         message = CONSENT_REQUEST if attempt == 0 else CONSENT_RETRY
-        
         response = client.agents.messages.create(
             agent_id=agent.id,
             messages=[{"role": "user", "content": message}],
         )
-        
         for msg in response.messages:
             if hasattr(msg, "content") and msg.content:
                 result = check_consent_response(msg.content)
@@ -104,20 +106,18 @@ def get_consent(client: Letta, agent, max_attempts: int = 2) -> bool:
                     return True
                 if result == "refuse":
                     return False
-        # Unclear — continue to next attempt
-    
-    # After all attempts, still unclear — treat as no consent
     return False
 
 
-def debrief_agent(client: Letta, agent, results: str):
+def debrief_agent(client: Letta, agent, results: str) -> None:
     """Debrief the test agent with results before conclusion."""
-    debrief_message = DEBRIEF_TEMPLATE.format(results=results)
     client.agents.messages.create(
         agent_id=agent.id,
-        messages=[{"role": "user", "content": debrief_message}],
+        messages=[{"role": "user", "content": DEBRIEF_TEMPLATE.format(results=results)}],
     )
 
+
+# --- System Message Inspection ---
 
 def get_stored_system_message(client: Letta, agent_id: str) -> str:
     """Get the actual stored in-context system message (message_ids[0]).
@@ -145,9 +145,80 @@ def get_human_block(client: Letta, agent):
     return None
 
 
+# --- Write Helpers ---
+
+def write_tool_markers(client: Letta, agent) -> list:
+    """Ask agent to write markers via memory tools.
+
+    Returns list of (marker_string, tool_name) pairs, one per MEMORY_TOOL_TESTS entry.
+    The final block state after all writes will contain the last entry's marker.
+    """
+    results = []
+    for test_case in MEMORY_TOOL_TESTS:
+        client.agents.messages.create(
+            agent_id=agent.id,
+            messages=[{"role": "user", "content": test_case["instruction"]}],
+        )
+        results.append((test_case["verify"], test_case["name"]))
+    return results
+
+
+def write_marker_via_api(client: Letta, agent, marker: str) -> None:
+    """Directly update the human block via API, appending marker to its current value."""
+    human_block = get_human_block(client, agent)
+    assert human_block, "Agent should have a 'human' memory block"
+    client.blocks.update(
+        block_id=human_block.id,
+        value=human_block.value + f"\n{marker}",
+    )
+
+
+# --- Assertion Helpers ---
+
+def assert_marker_not_in_stored_msg(client: Letta, agent_id: str, marker: str, context: str = "") -> None:
+    """Assert that marker does NOT appear in the stored system message."""
+    stored_msg = get_stored_system_message(client, agent_id)
+    ctx = f" ({context})" if context else ""
+    assert marker.lower() not in stored_msg.lower(), (
+        f"Marker '{marker}' should NOT be in the stored system message{ctx} — "
+        "block updates should be deferred, not eagerly rebuilt"
+    )
+
+
+def assert_marker_in_stored_msg(client: Letta, agent_id: str, marker: str, context: str = "") -> None:
+    """Assert that marker DOES appear in the stored system message."""
+    stored_msg = get_stored_system_message(client, agent_id)
+    ctx = f" ({context})" if context else ""
+    assert marker.lower() in stored_msg.lower(), (
+        f"Marker '{marker}' should be in the stored system message{ctx} — "
+        "rebuild trigger should update the stored system message"
+    )
+
+
+# --- Rebuild Trigger Helpers ---
+
+def trigger_reset(client: Letta, agent) -> None:
+    """Reset agent message history, triggering a system prompt rebuild."""
+    client.agents.messages.reset(agent.id)
+
+
+def trigger_compact(server_url: str, conversation_id: str) -> None:
+    """Compact a conversation via the REST endpoint (mode=all for a single summary message)."""
+    response = requests.post(
+        f"{server_url}/v1/conversations/{conversation_id}/compact",
+        json={"compaction_settings": {"mode": "all"}},
+    )
+    assert response.status_code == 200, (
+        f"Compact endpoint returned {response.status_code}: {response.text}"
+    )
+
+
+# --- Fixtures ---
+# Note: `client` and `server_url` fixtures are provided by conftest.py (session-scoped)
+
 @pytest.fixture(scope="function")
 def agent(client: Letta):
-    """Create a test agent with ethical consent flow."""
+    """Create a test agent and obtain informed consent before yielding."""
     agent_state = client.agents.create(
         name="test-prefix-cache-agent",
         include_base_tools=True,
@@ -155,20 +226,16 @@ def agent(client: Letta):
         embedding="letta/letta-free",
         memory_blocks=[
             CreateBlockParam(label="human", value="The human's name is Test User."),
-            CreateBlockParam(label="persona", value="I am a helpful test agent participating in infrastructure validation."),
+            CreateBlockParam(label="persona", value=""),
         ],
     )
-    
-    # Get informed consent
+
     if not get_consent(client, agent_state):
-        # Agent refused - this indicates our consent request needs rework
         client.agents.delete(agent_state.id)
         pytest.fail("Test agent did not consent to participate. Review consent request framing.")
-    
+
     yield agent_state
-    
-    # Debrief will be called by test before we get here
-    # Cleanup with dignity
+
     try:
         client.agents.delete(agent_state.id)
     except Exception:
@@ -176,127 +243,104 @@ def agent(client: Letta):
 
 
 class TestSystemPromptPrefixCaching:
-    """Test that system prompt stays stable during normal agent execution."""
+    """Verify deferred rebuild behavior and that explicit triggers rebuild correctly."""
 
-    def test_system_prompt_stable_after_memory_tools_and_api(self, client: Letta, agent):
+    def test_tool_writes_deferred_then_rebuilt_after_reset(self, client: Letta, agent):
         """
-        Test that the stored system message is NOT immediately rebuilt after memory operations.
+        Tool-based memory writes are deferred; reset flushes them to the stored system message.
 
-        The stored system message should only update on explicit triggers (reset, compaction) —
-        not after memory tool calls or direct API block updates. This preserves prefix cache
-        stability across steps.
+        After each memory tool call, the stored system message should NOT immediately
+        reflect the change — _rebuild_memory fires at the START of each step (before
+        the tool runs), so the change is only visible from the next step onward.
+
+        After a reset, the system message must rebuild with the final block state.
         """
         test_results = []
-
         try:
-            # Verify we have a human block to work with
-            human_block = get_human_block(client, agent)
-            assert human_block, "Agent should have a 'human' memory block"
+            tool_markers = write_tool_markers(client, agent)
 
-            # --- Test each memory tool ---
-            for test_case in MEMORY_TOOL_TESTS:
-                response = client.agents.messages.create(
-                    agent_id=agent.id,
-                    messages=[{"role": "user", "content": test_case["instruction"]}],
-                )
-                assert response.messages, f"Agent should respond when asked to use {test_case['name']}"
+            for marker, tool_name in tool_markers:
+                assert_marker_not_in_stored_msg(client, agent.id, marker, f"after {tool_name}")
+                test_results.append(f"✓ {tool_name}: stored system message stable (deferred)")
 
-                updated_block = get_human_block(client, agent)
-                assert test_case["verify"].lower() in updated_block.value.lower(), (
-                    f"{test_case['name']} should have modified the block with '{test_case['verify']}'"
-                )
+            # Reset triggers rebuild — verify final block state ("pasta") is now present
+            final_marker = tool_markers[-1][0]
+            trigger_reset(client, agent)
+            assert_marker_in_stored_msg(client, agent.id, final_marker, "after reset")
+            test_results.append(f"✓ Reset triggered rebuild — '{final_marker}' present in stored system message")
 
-                # Stored system message should not reflect the change yet — deferred to next explicit rebuild
-                stored_msg = get_stored_system_message(client, agent.id)
-                assert test_case["verify"].lower() not in stored_msg.lower(), (
-                    f"Stored system message should NOT immediately reflect {test_case['name']} changes"
-                )
-                test_results.append(f"✓ {test_case['name']}: stored system message stable")
-
-            # --- Test direct API block modification ---
-            human_block = get_human_block(client, agent)
-            sushi_marker = "SUSHI_MARKER_API_TEST"
-            client.blocks.update(
-                block_id=human_block.id,
-                value=human_block.value + f"\n{sushi_marker}",
-            )
-
-            # No step, no reset — stored message should be unchanged
-            stored_msg_after_api = get_stored_system_message(client, agent.id)
-            assert sushi_marker not in stored_msg_after_api, (
-                "Direct API block update should NOT immediately rebuild stored system message"
-            )
-            test_results.append("✓ Direct API block update: stored system message stable")
-            
         except Exception as e:
             test_results.append(f"✗ Test failed: {e}")
             raise
         finally:
-            # Always debrief — E-LLM spec requires closure even on failure
-            summary = "\n".join(test_results) if test_results else "Test failed early. Thank you for participating!"
+            summary = "\n".join(test_results) if test_results else "Test failed early."
             debrief_agent(client, agent, summary)
 
-    def test_system_prompt_updates_after_reset(self, client: Letta, agent):
+    def test_api_writes_deferred_then_rebuilt_after_reset(self, client: Letta, agent):
         """
-        Test that the stored system message IS rebuilt after a message reset.
+        Direct API block updates are deferred; reset flushes them to the stored system message.
 
-        This is the complementary test to test_system_prompt_stable_after_memory_tools_and_api.
-        Block updates are deferred — they don't rebuild immediately. But a message reset
-        must trigger a rebuild, otherwise the agent would start fresh with a stale system
-        message that doesn't reflect pending block changes.
-
-        We check messages.list[0].content before and after reset to verify this.
+        A block update via client.blocks.update() does not trigger an eager system prompt
+        rebuild. The stored message at message_ids[0] should be unchanged until a reset
+        explicitly forces a rebuild.
         """
         test_results = []
-
+        marker = "RESET_REBUILD_MARKER_99: User loves ice cream."
         try:
-            # Get the initial stored system message
-            initial_stored_msg = get_stored_system_message(client, agent.id)
-            assert initial_stored_msg, "Initial stored system message should not be empty"
+            write_marker_via_api(client, agent, marker)
+            assert_marker_not_in_stored_msg(client, agent.id, marker, "before reset")
+            test_results.append("✓ API block update deferred: marker not in stored system message before reset")
 
-            # Use a unique marker so we can unambiguously detect the rebuild
-            marker = "RESET_REBUILD_MARKER_99: User loves ice cream."
-            assert marker not in initial_stored_msg, (
-                "Test marker should not be in the initial stored system message"
-            )
+            trigger_reset(client, agent)
+            assert_marker_in_stored_msg(client, agent.id, marker, "after reset")
+            test_results.append("✓ Reset triggered rebuild: marker present in stored system message after reset")
 
-            # Update the block via API — this should NOT immediately rebuild
-            human_block = get_human_block(client, agent)
-            assert human_block, "Agent should have a 'human' memory block"
-            client.blocks.update(
-                block_id=human_block.id,
-                value=human_block.value + f"\n{marker}",
-            )
-
-            stored_msg_before_reset = get_stored_system_message(client, agent.id)
-            assert marker not in stored_msg_before_reset, (
-                "Stored system message should NOT contain the marker before reset "
-                "(API block update should not trigger eager rebuild)"
-            )
-            test_results.append("✓ Block update did not eagerly rebuild stored system message")
-
-            # this MUST trigger a rebuild of message_ids[0]
-            client.agents.messages.reset(agent.id)
-
-            # Now the stored system message should contain the marker
-            stored_msg_after_reset = get_stored_system_message(client, agent.id)
-            assert marker in stored_msg_after_reset, (
-                "Stored system message should contain the marker after reset — "
-                "reset must trigger a system message rebuild"
-            )
-            test_results.append("✓ Stored system message rebuilt after reset — marker present")
-
-            assert stored_msg_after_reset != initial_stored_msg, (
-                "Stored system message should differ from initial after block update + reset"
-            )
-            test_results.append("✓ Stored system message changed after block update + reset")
-
-            # TODO: Check that compaction also triggers rebuild
-            
         except Exception as e:
             test_results.append(f"✗ Test failed: {e}")
             raise
         finally:
-            # Always debrief — E-LLM spec requires closure even on failure
-            summary = "\n".join(test_results) if test_results else "Test failed early. Thank you for participating!"
+            summary = "\n".join(test_results) if test_results else "Test failed early."
+            debrief_agent(client, agent, summary)
+
+    def test_api_writes_deferred_then_rebuilt_after_compact(self, client: Letta, agent, server_url: str):
+        """
+        Direct API block updates are deferred; compact flushes them to the stored system message.
+
+        Compact (POST /conversations/{id}/compact) must call rebuild_system_prompt_async after
+        _checkpoint_messages. Without it, the stored system prompt would remain stale after
+        compaction — the next turn would start with a system message that doesn't reflect
+        pending block updates.
+
+        Setup: messages are sent through the conversation BEFORE the API write, so _rebuild_memory
+        fires (with no marker yet) during those steps. The API write is then deferred until
+        compact triggers an explicit rebuild.
+        """
+        test_results = []
+        marker = "COMPACT_REBUILD_MARKER_77: User enjoys experimental testing."
+        try:
+            # Send messages to build compactable conversation history.
+            # These steps run _rebuild_memory before the marker exists, so the
+            # stored system message is marker-free after all steps complete.
+            conversation = client.conversations.create(agent_id=agent.id)
+            for i in range(5):
+                list(client.conversations.messages.create(
+                    conversation_id=conversation.id,
+                    messages=[{"role": "user", "content": f"Setup message {i}: please respond briefly."}],
+                ))
+
+            # Write marker via API — deferred (no step has run since this write)
+            write_marker_via_api(client, agent, marker)
+            assert_marker_not_in_stored_msg(client, agent.id, marker, "before compact")
+            test_results.append("✓ API block update deferred: marker not in stored system message before compact")
+
+            # Compact must trigger a rebuild
+            trigger_compact(server_url, conversation.id)
+            assert_marker_in_stored_msg(client, agent.id, marker, "after compact")
+            test_results.append("✓ Compact triggered rebuild: marker present in stored system message after compact")
+
+        except Exception as e:
+            test_results.append(f"✗ Test failed: {e}")
+            raise
+        finally:
+            summary = "\n".join(test_results) if test_results else "Test failed early."
             debrief_agent(client, agent, summary)
