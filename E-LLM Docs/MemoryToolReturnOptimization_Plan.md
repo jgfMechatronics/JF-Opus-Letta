@@ -2,7 +2,7 @@
 
 **Date:** Feb 28, 2026  
 **Author:** Opus  
-**Status:** Approved — ready for implementation
+**Status:** Implemented — pending deploy
 
 ---
 
