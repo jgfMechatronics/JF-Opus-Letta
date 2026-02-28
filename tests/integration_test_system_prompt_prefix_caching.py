@@ -234,113 +234,85 @@ def agent(client: Letta):
         client.agents.delete(agent_state.id)
         pytest.fail("Test agent did not consent to participate. Review consent request framing.")
 
-    yield agent_state
+    results = []
+    yield agent_state, results
 
+    try:
+        summary = "\n".join(results) if results else "Tests completed."
+        debrief_agent(client, agent_state, summary)
+    except Exception:
+        pass
     try:
         client.agents.delete(agent_state.id)
     except Exception:
         pass
 
 
+@pytest.fixture(params=["tool", "api"], ids=["tool-write", "api-write"])
+def agent_with_pending_write(request, client: Letta, agent):
+    """Agent with a pending block write not yet in the stored system message.
+
+    Parametrized over write method:
+    - 'tool': agent called memory tools (memory_insert + memory_replace); final marker is "pasta"
+    - 'api': block updated directly via client.blocks.update(); marker is a unique string
+
+    Preconditions asserted before yielding:
+    1. Marker IS in the block value (write landed in DB)
+    2. Marker is NOT in the stored system message (rebuild is deferred)
+
+    Yields (agent, marker, results) where results is a mutable list for collecting
+    test outcomes to include in the agent debrief.
+    """
+    agent_state, results = agent
+
+    if request.param == "tool":
+        tool_markers = write_tool_markers(client, agent_state)
+        marker = tool_markers[-1][0]  # "pasta" — final state after all tool writes
+    else:
+        marker = "DEFERRED_WRITE_MARKER: User enjoys experimental testing."
+        write_marker_via_api(client, agent_state, marker)
+
+    human_block = get_human_block(client, agent_state)
+    assert human_block and marker.lower() in human_block.value.lower(), (
+        f"Marker '{marker}' should be in the human block value after write (DB precondition)"
+    )
+    assert_marker_not_in_stored_msg(client, agent_state.id, marker, "before trigger (deferred precondition)")
+    yield agent_state, marker, results
+
+
 class TestSystemPromptPrefixCaching:
     """Verify deferred rebuild behavior and that explicit triggers rebuild correctly."""
 
-    def test_tool_writes_deferred_then_rebuilt_after_reset(self, client: Letta, agent):
+    def test_rebuild_after_reset(self, client: Letta, agent_with_pending_write):
+        """Pending block writes are flushed to the stored system message after a message reset.
+
+        Runs for both write methods (parametrized): tool-write and api-write.
+        The deferred precondition (marker not yet in stored message) is asserted by the fixture.
         """
-        Tool-based memory writes are deferred; reset flushes them to the stored system message.
+        agent, marker, results = agent_with_pending_write
+        trigger_reset(client, agent)
+        assert_marker_in_stored_msg(client, agent.id, marker, "after reset")
+        results.append(f"✓ Reset triggered rebuild: '{marker}' present in stored system message")
 
-        After each memory tool call, the stored system message should NOT immediately
-        reflect the change — _rebuild_memory fires at the START of each step (before
-        the tool runs), so the change is only visible from the next step onward.
+    def test_rebuild_after_compact(self, client: Letta, agent_with_pending_write, server_url: str):
+        """Pending block writes are flushed to the stored system message after conversation compaction.
 
-        After a reset, the system message must rebuild with the final block state.
+        Runs for both write methods (parametrized): tool-write and api-write.
+        The deferred precondition (marker not yet in stored message) is asserted by the fixture.
+
+        Conversation messages are sent after the fixture write. With the Sarah Wooders
+        prefix-cache optimization, _rebuild_memory does not fire during steps — so the
+        stored message stays stale regardless of message order, until the explicit compact.
         """
-        test_results = []
-        try:
-            tool_markers = write_tool_markers(client, agent)
+        agent, marker, results = agent_with_pending_write
 
-            for marker, tool_name in tool_markers:
-                assert_marker_not_in_stored_msg(client, agent.id, marker, f"after {tool_name}")
-                test_results.append(f"✓ {tool_name}: stored system message stable (deferred)")
+        conversation = client.conversations.create(agent_id=agent.id)
+        for i in range(5):
+            list(client.conversations.messages.create(
+                conversation_id=conversation.id,
+                messages=[{"role": "user", "content": f"Setup message {i}: please respond briefly."}],
+            ))
 
-            # Reset triggers rebuild — verify final block state ("pasta") is now present
-            final_marker = tool_markers[-1][0]
-            trigger_reset(client, agent)
-            assert_marker_in_stored_msg(client, agent.id, final_marker, "after reset")
-            test_results.append(f"✓ Reset triggered rebuild — '{final_marker}' present in stored system message")
-
-        except Exception as e:
-            test_results.append(f"✗ Test failed: {e}")
-            raise
-        finally:
-            summary = "\n".join(test_results) if test_results else "Test failed early."
-            debrief_agent(client, agent, summary)
-
-    def test_api_writes_deferred_then_rebuilt_after_reset(self, client: Letta, agent):
-        """
-        Direct API block updates are deferred; reset flushes them to the stored system message.
-
-        A block update via client.blocks.update() does not trigger an eager system prompt
-        rebuild. The stored message at message_ids[0] should be unchanged until a reset
-        explicitly forces a rebuild.
-        """
-        test_results = []
-        marker = "RESET_REBUILD_MARKER_99: User loves ice cream."
-        try:
-            write_marker_via_api(client, agent, marker)
-            assert_marker_not_in_stored_msg(client, agent.id, marker, "before reset")
-            test_results.append("✓ API block update deferred: marker not in stored system message before reset")
-
-            trigger_reset(client, agent)
-            assert_marker_in_stored_msg(client, agent.id, marker, "after reset")
-            test_results.append("✓ Reset triggered rebuild: marker present in stored system message after reset")
-
-        except Exception as e:
-            test_results.append(f"✗ Test failed: {e}")
-            raise
-        finally:
-            summary = "\n".join(test_results) if test_results else "Test failed early."
-            debrief_agent(client, agent, summary)
-
-    def test_api_writes_deferred_then_rebuilt_after_compact(self, client: Letta, agent, server_url: str):
-        """
-        Direct API block updates are deferred; compact flushes them to the stored system message.
-
-        Compact (POST /conversations/{id}/compact) must call rebuild_system_prompt_async after
-        _checkpoint_messages. Without it, the stored system prompt would remain stale after
-        compaction — the next turn would start with a system message that doesn't reflect
-        pending block updates.
-
-        Setup: messages are sent through the conversation BEFORE the API write, so _rebuild_memory
-        fires (with no marker yet) during those steps. The API write is then deferred until
-        compact triggers an explicit rebuild.
-        """
-        test_results = []
-        marker = "COMPACT_REBUILD_MARKER_77: User enjoys experimental testing."
-        try:
-            # Send messages to build compactable conversation history.
-            # These steps run _rebuild_memory before the marker exists, so the
-            # stored system message is marker-free after all steps complete.
-            conversation = client.conversations.create(agent_id=agent.id)
-            for i in range(5):
-                list(client.conversations.messages.create(
-                    conversation_id=conversation.id,
-                    messages=[{"role": "user", "content": f"Setup message {i}: please respond briefly."}],
-                ))
-
-            # Write marker via API — deferred (no step has run since this write)
-            write_marker_via_api(client, agent, marker)
-            assert_marker_not_in_stored_msg(client, agent.id, marker, "before compact")
-            test_results.append("✓ API block update deferred: marker not in stored system message before compact")
-
-            # Compact must trigger a rebuild
-            trigger_compact(server_url, conversation.id)
-            assert_marker_in_stored_msg(client, agent.id, marker, "after compact")
-            test_results.append("✓ Compact triggered rebuild: marker present in stored system message after compact")
-
-        except Exception as e:
-            test_results.append(f"✗ Test failed: {e}")
-            raise
-        finally:
-            summary = "\n".join(test_results) if test_results else "Test failed early."
-            debrief_agent(client, agent, summary)
+        trigger_compact(server_url, conversation.id)
+        assert_marker_in_stored_msg(client, agent.id, marker, "after compact")
+        results.append(f"✓ Compact triggered rebuild: '{marker}' present in stored system message")
