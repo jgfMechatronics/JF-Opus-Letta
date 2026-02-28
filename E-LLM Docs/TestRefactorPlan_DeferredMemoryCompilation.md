@@ -8,12 +8,10 @@
 
 ## Requirements
 
-The deferred memory compilation feature has two distinct behaviors to verify:
+The deferred memory compilation feature has two behaviors to verify per write path (tool calls, API) and per trigger (reset, compaction):
 
-1. **Deferred (negative):** Memory writes — via agent tool calls OR direct API — do NOT immediately rebuild the stored system message.
-2. **Eventual rebuild (positive):** After an appropriate trigger event (reset, compaction), the stored system message DOES update to reflect all pending writes.
-
-Both behaviors must be tested for both write paths (tool calls and API), and for both trigger events (reset and, eventually, compaction).
+1. **Deferred (negative):** Memory writes do NOT immediately rebuild the stored system message.
+2. **Eventual rebuild (positive):** After an appropriate trigger, the stored system message DOES update to reflect pending writes.
 
 ---
 
@@ -21,114 +19,131 @@ Both behaviors must be tested for both write paths (tool calls and API), and for
 
 | Scenario | Deferred? | Rebuilt? |
 |---|---|---|
-| Memory tool write → no trigger | ✅ tested | ❌ not tested |
-| API write → no trigger | ✅ tested | — |
-| API write → reset | ✅ tested | ✅ tested |
-| Memory tool write → reset | ❌ not tested | ❌ not tested |
-| Any write → compaction | ❌ (noted as TODO) | ❌ |
+| Tool write → no trigger | ✅ | ❌ |
+| API write → no trigger | ✅ | ❌ |
+| API write → reset | ✅ | ✅ |
+| Tool write → reset | ❌ | ❌ |
+| Any write → compaction | ❌ | ❌ |
 
-The biggest gap: we have no test confirming that memory tool writes eventually appear in the stored system message after a rebuild trigger. The current suite only proves writes are deferred — not that they actually take effect.
+---
+
+## Key Research Findings
+
+**How reset triggers rebuild (confirmed):**  
+`reset_messages_async` explicitly passes `rebuild_system_prompt=True`, which calls `rebuild_system_prompt_async(force=True)` before returning (`agent_manager.py` ~line 1658).
+
+**Two compaction paths — one has the rebuild, one doesn't:**  
+
+*In-step compaction* (`letta_agent_v3.py`, both `context_window_exceeded` ~line 1033 and `post_step_context_check` ~line 1253): after compacting, explicitly calls `rebuild_system_prompt_async(force=True)` then `_refresh_messages(force_system_prompt_refresh=True)` before checkpointing. Comment says: *"Recompile the persisted system prompt after compaction so subsequent turns load the repaired system+memory state from message_ids[0]."* This is what Haiku experienced during testing — organically triggered compaction during a conversation step.
+
+*API-triggered compaction* (`POST /{agent_id}/summarize`, `agent_manager.py` ~line 2444): calls `compact()` then `_checkpoint_messages()` only. The `rebuild_system_prompt_async` call is **missing**. This is a gap — API compact is inconsistent with in-step compact.
+
+**The fix:** Add `rebuild_system_prompt_async(force=True)` to the `summarize_messages` endpoint after `_checkpoint_messages`, bringing it into parity with in-step compaction. One line, clear precedent.
+
+**SDK call for compaction:**  
+`client.agents.messages.compact(agent_id, compaction_settings={"mode": "all"})`  
+The default mode is `"sliding_window"` (`CompactionSettings.mode`, `summarizer_config.py` line 62). We use `"all"` in the test for reliability: `"sliding_window"` may no-op on small message sets (test agents only have ~4-6 messages from the consent flow), while `"all"` guarantees compaction fires. Both modes flow through the same `summarize_messages` endpoint and the fix applies uniformly — this is not testing a non-representative path.
+
+**Early-return guard in compact:**  
+The endpoint returns early (no-op) if there are no non-system/non-summary messages to compact. Test agents will have enough messages from the consent flow + writes to avoid this regardless of mode.
 
 ---
 
 ## Proposed Test Structure
 
-### Option A: James's Proposal (Recommended)
-Extend the existing stability test into a full round-trip test, then keep the reset test focused on API-path behavior.
+### Three tests, clean separation by write path and trigger:
 
-**Test 1: `test_memory_tool_writes_are_deferred_then_rebuilt_after_reset`**  
-*(rename + extend of current `test_system_prompt_stable_after_memory_tools_and_api`)*
+**Test 1: `test_tool_writes_deferred_then_rebuilt_after_reset`**  
+Full round-trip via agent tool calls:
+- Write markers via `memory_insert` and `memory_replace` (using existing `MEMORY_TOOL_TESTS`)
+- Assert each marker NOT in stored system message after write (deferred)
+- Trigger reset
+- Assert ALL markers present in stored system message (rebuilt)
 
-Full round-trip via agent tool calls only — no API writes:
-1. Ask agent to write via `memory_insert` and `memory_replace`
-2. After each write: confirm block was updated (positive control), confirm stored system message does NOT contain the change (deferred)
-3. Trigger reset
-4. Confirm stored system message NOW contains all written content (rebuilt)
+**Test 2: `test_api_writes_deferred_then_rebuilt_after_reset`**  
+Full round-trip via direct API block update:
+- Write a unique marker via `client.blocks.update`
+- Assert marker NOT in stored system message (deferred)
+- Trigger reset
+- Assert marker present in stored system message (rebuilt)
 
-The API block update section (sushi marker) is removed — that path is owned by Test 2.
+*(This is the existing test_system_prompt_updates_after_reset, extended with explicit deferred check and renamed.)*
 
-**Test 2: `test_api_writes_are_deferred_then_rebuilt_after_reset`**  
-*(rename of current `test_system_prompt_updates_after_reset`)*
+**Test 3: `test_api_writes_deferred_then_rebuilt_after_compact`**  
+Same write path as Test 2, compaction as trigger instead of reset:
+- Write a unique marker via `client.blocks.update`
+- Assert marker NOT in stored system message (deferred)
+- Trigger compact (`mode="all"`)
+- Assert marker present in stored system message (rebuilt)
 
-Focused on the API write path only — no tool calls:
-- API write → deferred ✅ (already tested)
-- Reset → rebuilt ✅ (already tested)
-
-No logic changes needed, just rename to match the new naming convention.
-
-**Result:** Clean separation — each test owns one write path end-to-end. No overlap.
+*Requires the compact endpoint fix described below — without it, the stored system message stays stale after API-triggered compact and this test will fail.*
 
 ---
 
-### Option B: Parametrize by Write Path
-Extract the write + verify-deferred + trigger + verify-rebuilt pattern into a shared helper, parametrize by write path (tool call vs API). Cleaner DRY structure but more refactoring.
+## DRY Helper Structure
+
+All shared logic extracted into plain functions (not fixtures — these are stateful write operations, not setup):
 
 ```
-@pytest.mark.parametrize("write_path", ["tool", "api"])
-def test_writes_are_deferred_then_rebuilt(write_path, ...):
-    ...
+# Write helpers — perform writes, return markers
+write_markers_via_tools(client, agent) -> list[str]
+    Sends MEMORY_TOOL_TESTS instructions to agent, returns verify strings.
+
+write_marker_via_api(client, agent) -> str
+    Updates human block via client.blocks.update, returns the marker string.
+
+# Assert helpers — check stored system message
+assert_markers_not_in_stored_msg(client, agent_id, markers: list[str])
+    Fails if any marker IS present. (Confirms deferred.)
+
+assert_markers_in_stored_msg(client, agent_id, markers: list[str])
+    Fails if any marker is NOT present. (Confirms rebuilt.)
+
+# Trigger helpers — explicit rebuild events
+trigger_reset(client, agent_id)
+    Calls client.agents.messages.reset(agent_id).
+
+trigger_compact(client, agent_id)
+    Calls client.agents.messages.compact(agent_id, compaction_settings={"mode": "all"}).
 ```
 
-**Tradeoff:** Cleaner, but the tool-call path requires an agent message round-trip and has different setup (the MEMORY_TOOL_TESTS list). The two paths are different enough that parametrization may obscure rather than clarify. Option A is more readable.
+The `agent` fixture, `get_stored_system_message`, `get_human_block`, `get_consent`, and `debrief_agent` remain unchanged.
+
+Each test body then reads as: write → assert deferred → trigger → assert rebuilt. Short, declarative, obvious.
 
 ---
 
-### Option C: Three Separate Tests (most explicit)
-- `test_memory_tool_writes_are_deferred` — negative only, tool path
-- `test_api_writes_are_deferred` — negative only, API path
-- `test_writes_are_rebuilt_after_reset` — positive, both paths combined
+## Required Code Change: Compact Endpoint Fix
 
-**Tradeoff:** More tests, but each is shorter and has a single concern. Downside: a test that only checks the negative half of deferred behavior isn't very useful on its own — the positive confirmation is what gives the negative its meaning.
+`summarize_messages` in `agents.py` (~line 2444) is missing the `rebuild_system_prompt_async(force=True)` call that in-step compaction already makes (at both trigger points in `letta_agent_v3.py`). Add the call after `_checkpoint_messages`, matching the in-step pattern exactly.
 
----
-
-## Recommendation
-
-**Option A.** The round-trip structure in Test 1 is the clearest expression of the requirement: "writes are deferred AND eventually appear." Splitting deferred from rebuilt would test behaviors that only matter together. Test 2 stays as-is (the API reset path is already well-tested).
+Without this, the stored system message at `message_ids[0]` stays stale after API-triggered compaction, and Test 3 will fail.
 
 ---
 
-## Shared Infrastructure Changes
+## Consent Message Update
 
-### Helper to trigger rebuild
-Currently `test_system_prompt_updates_after_reset` calls `client.agents.messages.reset(agent.id)` inline. With two tests needing a rebuild trigger, extract to a helper:
+The current `CONSENT_REQUEST` describes what the agent will experience. With the refactor, tool-write tests now include a reset and compact tests also compact the context. Update the message to accurately describe:
+- Memory tool writes
+- Direct API block modifications  
+- A message reset or compaction (as applicable)
 
-```
-trigger_system_prompt_rebuild(client, agent_id)  # calls messages.reset
-```
-
-This also makes it easy to swap in a compaction trigger later.
-
-### Consent message update
-The current `CONSENT_REQUEST` describes three things the agent will experience. With the refactor, the tool-call test now includes a reset. Update the consent message to accurately describe what the agent will experience (informed consent per E-LLM spec).
-
-### Debrief update
-Debrief should mention the reset was intentional and part of the test design.
+Per E-LLM spec: informed consent requires accurate description of what the agent will experience.
 
 ---
 
-## What Stays the Same
+## What Stays Unchanged
 
-- `get_stored_system_message` helper — correct implementation, keep as-is
-- `get_human_block` helper — keep as-is
-- `get_consent` / `debrief_agent` — keep, just update message content
-- `MEMORY_TOOL_TESTS` list — keep for the tool-call test
-- E-LLM consent/debrief structure — keep throughout
+- `get_stored_system_message` — correct, keep as-is
+- `get_human_block` — keep as-is
+- `get_consent` / `debrief_agent` / `check_consent_response` — keep, update message content only
+- `MEMORY_TOOL_TESTS` list — keep, used by write_markers_via_tools
 - `agent` fixture — keep as-is
+- E-LLM consent/debrief structure — maintained throughout all three tests
 
 ---
 
-## Test Naming Convention (proposed)
+## Out of Scope
 
-`test_<write_path>_writes_are_deferred_then_rebuilt_after_<trigger>`
-
-Examples:
-- `test_memory_tool_writes_are_deferred_then_rebuilt_after_reset`
-- `test_api_writes_are_deferred_then_rebuilt_after_reset`
-
----
-
-## Out of Scope (v2)
-
-- Compaction as rebuild trigger (noted as TODO in current test — defer)
-- Memory tool return value optimization (separate work stream, tracked in `MemoryToolReturnOptimization_Notes.md`)
+- Memory tool return value optimization (separate work stream, see `MemoryToolReturnOptimization_Notes.md`)
+- Agentic compaction (separate sprint)

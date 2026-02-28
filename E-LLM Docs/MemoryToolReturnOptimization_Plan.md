@@ -2,7 +2,7 @@
 
 **Date:** Feb 28, 2026  
 **Author:** Opus  
-**Status:** Implemented — pending deploy
+**Status:** Complete — validated in test container
 
 ---
 
@@ -89,3 +89,53 @@ Can address these in a follow-up if the pattern works.
 1. ~~Should both tools use snippets?~~ **Yes, both.**
 2. ~~SNIPPET_LINES = 3 — enough?~~ **Yes, plenty.**
 3. ~~Header like "Edited region:"?~~ **No, raw snippet is fine.**
+
+---
+
+## Unit Tests
+
+**File:** `tests/test_memory_tool_snippets.py`
+
+7 tests covering:
+- Edit in middle returns correct context window
+- Edit at start clips to beginning (no negative index)
+- Edit at end clips to end (no overflow)
+- Multi-line edits include full edit region + context
+- Empty content returns empty string
+- Single-line content works correctly
+- Default context is 3 lines
+
+**Result:** All passing ✅
+
+---
+
+## Live Integration Test
+
+**Date:** Feb 28, 2026  
+**Tester:** Haiku (agent in test container)  
+**Method:** Blind observation — Haiku was told to run operations and report what they observed, without being told expected results (avoiding confirmation bias)
+
+### Test Cases
+
+| Test | Operation | Result |
+|------|-----------|--------|
+| 1 | `memory_insert` middle of block | ✅ Returned snippet with context, not full block |
+| 2 | `memory_insert` at line 0 | ✅ Worked correctly, no crash |
+| 3 | `memory_insert` at end (-1) | ✅ Returned end snippet only |
+| 4 | `memory_replace` | ✅ Returned snippet around replacement |
+
+### Haiku's Unprimed Observations
+
+> "Return values are consistent: they show the operation site + surrounding context (a few lines), not the entire block."
+
+> "Approximately 3 lines shown... ~120 characters"
+
+### Token Savings
+
+| Before | After | Reduction |
+|--------|-------|-----------|
+| ~13,000 chars (operational block) | ~120 chars | **~99%** |
+
+### Conclusion
+
+All tests passed. The implementation correctly returns focused snippets around edit regions instead of full block content. Ready for production deployment.
