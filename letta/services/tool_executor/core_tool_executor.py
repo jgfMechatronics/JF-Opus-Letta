@@ -952,13 +952,18 @@ class LettaCoreToolExecutor(ToolExecutor):
         # Replace old_string with new_string
         new_value = current_value.replace(str(old_string), str(new_string))
 
+        # Compute snippet around the edit
+        replacement_line = current_value.split(old_string)[0].count("\n")
+        edit_line_count = len(new_string.split("\n"))
+        snippet = _compute_snippet(new_value, replacement_line, edit_line_count)
+
         # Write the new content to the block
         await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(value=new_value), actor=actor)
 
         # Keep in-memory AgentState consistent with DB
         agent_state.memory.update_block_value(label=label, value=new_value)
 
-        return new_value
+        return snippet
 
     async def memory_str_insert(self, agent_state: AgentState, actor: User, path: str, insert_text: str, insert_line: int = -1) -> str:
         """Insert text into a memory block at a specific line."""
@@ -1011,7 +1016,7 @@ class LettaCoreToolExecutor(ToolExecutor):
 
         # Collate into the new value to update
         new_value = "\n".join(new_value_lines)
-        "\n".join(snippet_lines)
+        snippet = "\n".join(snippet_lines)
 
         # Write into the block
         await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(value=new_value), actor=actor)
@@ -1019,7 +1024,7 @@ class LettaCoreToolExecutor(ToolExecutor):
         # Keep in-memory AgentState consistent with DB
         agent_state.memory.update_block_value(label=label, value=new_value)
 
-        return new_value
+        return snippet
 
     async def memory(
         self,
