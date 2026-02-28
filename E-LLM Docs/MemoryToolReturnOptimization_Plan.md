@@ -36,13 +36,21 @@ Return ~6 lines of context around the edit (3 before, edit, 3 after). More infor
 
 ## Implementation Plan
 
+### Change 0: Extract common snippet helper (DRY)
+
+Both tools need snippet logic. Extract to a shared helper function to avoid duplication.
+
+**Function signature:** `_compute_snippet(content: str, edit_start_line: int, edit_line_count: int, context_lines: int = 3) -> str`
+
+**Location:** Same file (`core_tool_executor.py`), as a module-level helper or method on the class.
+
 ### Change 1: `memory_insert`
 
 **File:** `letta/services/tool_executor/core_tool_executor.py`, lines 732-740
 
 **What to change:**
 - Line 733 computes `"\n".join(snippet_lines)` but discards the result (dead code)
-- Assign result to `snippet` variable
+- Replace with call to shared helper
 - Change return statement (line 740) from `return new_value` to `return snippet`
 
 ### Change 2: `memory_replace`
@@ -50,8 +58,7 @@ Return ~6 lines of context around the edit (3 before, edit, 3 after). More infor
 **File:** `letta/services/tool_executor/core_tool_executor.py`, lines 393-400
 
 **What to change:**
-- Add snippet computation after line 393 (the replace operation)
-- Use same approach as commented-out code in `base.py` lines 382-386: find replacement line, compute start/end with SNIPPET_LINES=3 buffer
+- After line 393 (the replace operation), call shared helper to compute snippet
 - Change return statement (line 400) from `return new_value` to `return snippet`
 
 ---
