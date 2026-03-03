@@ -237,15 +237,10 @@ def agent(client: Letta):
     results = []
     yield agent_state, results
 
-    try:
-        summary = "\n".join(results) if results else "Tests completed."
-        debrief_agent(client, agent_state, summary)
-    except Exception:
-        pass
-    try:
-        client.agents.delete(agent_state.id)
-    except Exception:
-        pass
+    summary = "\n".join(results) if results else "Tests completed."
+    debrief_agent(client, agent_state, summary)
+    client.agents.delete(agent_state.id)
+
 
 
 @pytest.fixture(params=["tool", "api"], ids=["tool-write", "api-write"])
