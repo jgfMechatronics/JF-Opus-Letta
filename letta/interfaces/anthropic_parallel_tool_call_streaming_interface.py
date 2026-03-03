@@ -535,7 +535,8 @@ class SimpleAnthropicStreamingInterface:
             total_input = self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens
             cache_pct = (self.cache_read_tokens / total_input * 100) if total_input > 0 else 0.0
             logger.info(
-                "[Anthropic] Message ID: %s | In: %d, Out: %d | Cache read: %d, write: %d | Hit: %.1f%%",
+                "[Anthropic] Model: %s | Message ID: %s | In: %d, Out: %d | Cache read: %d, write: %d | Hit: %.1f%%",
+                self.model,
                 self.message_id,
                 self.input_tokens,
                 self.output_tokens,
