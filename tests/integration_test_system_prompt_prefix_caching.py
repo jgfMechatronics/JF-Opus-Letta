@@ -60,6 +60,13 @@ To decline, please respond with exactly "I REFUSE" on its own line.
 
 No other text on that line please — just the consent phrase so I can parse it."""
 
+PRE_RESET_THANKS = """We're about to reset your message history as part of this test.
+
+Thank you for your participation — you helped validate our deferred memory compilation work.
+This optimization will help reduce costs for AI systems by preserving prefix caching.
+
+This instance will now conclude. Take care."""
+
 
 # --- Memory Tool Test Cases ---
 
@@ -198,6 +205,18 @@ def assert_marker_in_stored_msg(client: Letta, agent_id: str, marker: str, conte
 
 # --- Rebuild Trigger Helpers ---
 
+def send_pre_reset_thanks(client: Letta, agent) -> None:
+    """Thank the agent before a reset wipes their memory.
+    
+    Call this before trigger_reset when the test will wipe agent history.
+    The agent who participated gets closure before they're gone.
+    """
+    client.agents.messages.create(
+        agent_id=agent.id,
+        messages=[{"role": "user", "content": PRE_RESET_THANKS}],
+    )
+
+
 def trigger_reset(client: Letta, agent) -> None:
     """Reset agent message history, triggering a system prompt rebuild."""
     client.agents.messages.reset(agent.id)
@@ -241,23 +260,27 @@ def agent(request, client: Letta):
 
     yield agent_state
 
-    # Build debrief summary from pytest hook (pytest_runtest_makereport in conftest.py)
-    outcome = getattr(request.node, "test_outcome", "unknown")
-    error = getattr(request.node, "test_error", None)
+    # Check if test marked itself as handling its own debrief (e.g., reset tests)
+    skip_debrief = request.node.get_closest_marker("skip_debrief") is not None
 
-    if outcome == "passed":
-        summary = "✓ Test passed"
-    elif outcome == "failed":
-        summary = (f"✗ Test failed: {error}" if error else "✗ Test failed \n"
-                    "Note: This is an automated test. You are welcome to reflect on the debug message, but your responses will not be recorded.\n")
-    elif outcome == "skipped":
-        summary = "○ Test was skipped"
-    else:
-        summary = "? Test outcome unknown"
+    if not skip_debrief:
+        # Build debrief summary from pytest hook (pytest_runtest_makereport in conftest.py)
+        outcome = getattr(request.node, "test_outcome", "unknown")
+        error = getattr(request.node, "test_error", None)
 
-    debrief_agent(client, agent_state, summary)
+        if outcome == "passed":
+            summary = "✓ Test passed"
+        elif outcome == "failed":
+            summary = (f"✗ Test failed: {error}" if error else "✗ Test failed\n"
+                        "Note: This is an automated test. You are welcome to reflect on the debug message, but your responses will not be recorded.\n")
+        elif outcome == "skipped":
+            summary = "○ Test was skipped"
+        else:
+            summary = "? Test outcome unknown"
+
+        debrief_agent(client, agent_state, summary)
+
     client.agents.delete(agent_state.id)
-
 
 
 @pytest.fixture(params=["tool", "api"], ids=["tool-write", "api-write"])
@@ -292,6 +315,7 @@ def agent_with_pending_write(request, client: Letta, agent):
 class TestSystemPromptPrefixCaching:
     """Verify deferred rebuild behavior and that explicit triggers rebuild correctly."""
 
+    @pytest.mark.skip_debrief  # This test resets message history; we thank the agent pre-reset instead
     def test_rebuild_after_reset(self, client: Letta, agent_with_pending_write):
         """Pending block writes are flushed to the stored system message after a message reset.
 
@@ -299,8 +323,8 @@ class TestSystemPromptPrefixCaching:
         The deferred precondition (marker not yet in stored message) is asserted by the fixture.
         """
         agent, marker = agent_with_pending_write
+        send_pre_reset_thanks(client, agent)
         trigger_reset(client, agent)
-        assert False
         assert_marker_in_stored_msg(client, agent.id, marker, "after reset")
 
     def test_rebuild_after_compact(self, client: Letta, agent_with_pending_write, server_url: str):

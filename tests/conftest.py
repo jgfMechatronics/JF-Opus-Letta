@@ -18,6 +18,11 @@ from letta.services.user_manager import UserManager
 
 def pytest_configure(config):
     logging.basicConfig(level=logging.DEBUG)
+    # Register custom markers
+    config.addinivalue_line(
+        "markers",
+        "skip_debrief: Test handles its own agent debrief (e.g., before a reset wipes history)"
+    )
 
 
 # --- Test Result Capture Hook ---
