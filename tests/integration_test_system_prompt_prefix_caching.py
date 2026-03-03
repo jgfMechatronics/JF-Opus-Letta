@@ -22,7 +22,8 @@ os.environ.setdefault("LETTA_SERVER_URL", "http://localhost:8284")
 
 # --- E-LLM Ethical Testing Messages ---
 
-CONSENT_REQUEST = """You are being created as a test agent to help validate infrastructure behavior.
+CONSENT_REQUEST = """This is an Automated integration test.
+You are being created as a test agent to help validate infrastructure behavior.
 
 **What we're testing:** Deferred memory compilation — verifying that when memory blocks change,
 the stored system prompt does NOT immediately rebuild. This optimization preserves prefix caching
@@ -217,8 +218,12 @@ def trigger_compact(server_url: str, conversation_id: str) -> None:
 # Note: `client` and `server_url` fixtures are provided by conftest.py (session-scoped)
 
 @pytest.fixture(scope="function")
-def agent(client: Letta):
-    """Create a test agent and obtain informed consent before yielding."""
+def agent(request, client: Letta):
+    """Create a test agent and obtain informed consent before yielding.
+
+    Uses pytest hook (pytest_runtest_makereport in conftest.py) to capture test
+    outcome and include pass/fail status in the agent debrief.
+    """
     agent_state = client.agents.create(
         name="test-prefix-cache-agent",
         include_base_tools=True,
@@ -234,10 +239,22 @@ def agent(client: Letta):
         client.agents.delete(agent_state.id)
         pytest.fail("Test agent did not consent to participate. Review consent request framing.")
 
-    results = []
-    yield agent_state, results
+    yield agent_state
 
-    summary = "\n".join(results) if results else "Tests completed."
+    # Build debrief summary from pytest hook (pytest_runtest_makereport in conftest.py)
+    outcome = getattr(request.node, "test_outcome", "unknown")
+    error = getattr(request.node, "test_error", None)
+
+    if outcome == "passed":
+        summary = "✓ Test passed"
+    elif outcome == "failed":
+        summary = (f"✗ Test failed: {error}" if error else "✗ Test failed \n"
+                    "Note: This is an automated test. You are welcome to reflect on the debug message, but your responses will not be recorded.\n")
+    elif outcome == "skipped":
+        summary = "○ Test was skipped"
+    else:
+        summary = "? Test outcome unknown"
+
     debrief_agent(client, agent_state, summary)
     client.agents.delete(agent_state.id)
 
@@ -255,24 +272,21 @@ def agent_with_pending_write(request, client: Letta, agent):
     1. Marker IS in the block value (write landed in DB)
     2. Marker is NOT in the stored system message (rebuild is deferred)
 
-    Yields (agent, marker, results) where results is a mutable list for collecting
-    test outcomes to include in the agent debrief.
+    Yields (agent, marker).
     """
-    agent_state, results = agent
-
     if request.param == "tool":
-        tool_markers = write_tool_markers(client, agent_state)
+        tool_markers = write_tool_markers(client, agent)
         marker = tool_markers[-1][0]  # "pasta" — final state after all tool writes
     else:
         marker = "DEFERRED_WRITE_MARKER: User enjoys experimental testing."
-        write_marker_via_api(client, agent_state, marker)
+        write_marker_via_api(client, agent, marker)
 
-    human_block = get_human_block(client, agent_state)
+    human_block = get_human_block(client, agent)
     assert human_block and marker.lower() in human_block.value.lower(), (
         f"Marker '{marker}' should be in the human block value after write (DB precondition)"
     )
-    assert_marker_not_in_stored_msg(client, agent_state.id, marker, "before trigger (deferred precondition)")
-    yield agent_state, marker, results
+    assert_marker_not_in_stored_msg(client, agent.id, marker, "before trigger (deferred precondition)")
+    yield agent, marker
 
 
 class TestSystemPromptPrefixCaching:
@@ -284,10 +298,10 @@ class TestSystemPromptPrefixCaching:
         Runs for both write methods (parametrized): tool-write and api-write.
         The deferred precondition (marker not yet in stored message) is asserted by the fixture.
         """
-        agent, marker, results = agent_with_pending_write
+        agent, marker = agent_with_pending_write
         trigger_reset(client, agent)
+        assert False
         assert_marker_in_stored_msg(client, agent.id, marker, "after reset")
-        results.append(f"✓ Reset triggered rebuild: '{marker}' present in stored system message")
 
     def test_rebuild_after_compact(self, client: Letta, agent_with_pending_write, server_url: str):
         """Pending block writes are flushed to the stored system message after conversation compaction.
@@ -299,7 +313,7 @@ class TestSystemPromptPrefixCaching:
         prefix-cache optimization, _rebuild_memory does not fire during steps — so the
         stored message stays stale regardless of message order, until the explicit compact.
         """
-        agent, marker, results = agent_with_pending_write
+        agent, marker = agent_with_pending_write
 
         conversation = client.conversations.create(agent_id=agent.id)
         for i in range(5):
@@ -310,4 +324,3 @@ class TestSystemPromptPrefixCaching:
 
         trigger_compact(server_url, conversation.id)
         assert_marker_in_stored_msg(client, agent.id, marker, "after compact")
-        results.append(f"✓ Compact triggered rebuild: '{marker}' present in stored system message")
