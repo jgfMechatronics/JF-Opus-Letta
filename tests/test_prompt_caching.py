@@ -519,7 +519,7 @@ async def test_prompt_caching_multiple_messages(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,model_settings,min_tokens,read_field,write_field", CACHING_TEST_CONFIGS)
-async def test_prompt_caching_cache_invalidation_on_memory_update(
+async def test_prompt_caching_cache_preserved_on_deferred_memory_update(
     async_client: AsyncLetta,
     model: str,
     model_settings: dict,
@@ -528,16 +528,21 @@ async def test_prompt_caching_cache_invalidation_on_memory_update(
     write_field: str,
 ):
     """
-    Test that updating memory blocks invalidates the cache.
+    Test that updating memory blocks does NOT immediately invalidate the cache.
 
-    When memory is modified, the prompt changes, so the cache should miss
-    and a new cache should be created.
+    Memory block writes are deferred — the compiled system prompt is not rebuilt
+    until the next compaction or message reset. This means the prefix cache remains
+    valid across turns even after a block update via the API.
+
+    Cache invalidation on memory update was the old eager-rebuild behavior. The new
+    contract is: block writes are cheap and cache-preserving; the prompt rebuilds
+    lazily at compaction boundaries.
     """
     agent = await create_agent_with_large_memory(
         async_client,
         model,
         model_settings,
-        "cache-invalidation",
+        "cache-deferred",
     )
 
     try:
@@ -559,7 +564,7 @@ async def test_prompt_caching_cache_invalidation_on_memory_update(
         logger.info(f"[{model}] Cache hit before memory update: {read_tokens_before_update}")
         assert read_tokens_before_update is not None and read_tokens_before_update > 0, "Should have cache hit before update"
 
-        # Update memory block (this should invalidate cache)
+        # Update memory block via API (deferred — does NOT trigger a system prompt rebuild)
         agent = await async_client.agents.get(agent_id=agent.id)
         persona_block = next((b for b in agent.memory_blocks if b.label == "persona"), None)
         assert persona_block is not None, "Should have persona block"
@@ -570,27 +575,29 @@ async def test_prompt_caching_cache_invalidation_on_memory_update(
             value=LARGE_MEMORY_BLOCK + "\n\nADDITIONAL NOTE: You are now extra helpful!",
         )
 
-        # Message 3: After memory update, cache should MISS (then create new cache)
+        # Message 3: After deferred memory update, cache should STILL HIT —
+        # the stored system prompt hasn't changed yet, so the prefix is stable.
         response3 = await async_client.agents.messages.create(
             agent_id=agent.id,
             messages=[MessageCreateParam(role="user", content="What changed?")],
         )
 
-        # After memory update, we expect cache miss (low or zero cache hits)
         read_tokens_after_update = response3.usage.cached_input_tokens if response3.usage else None
         prompt_tokens_after = response3.usage.prompt_tokens if response3.usage else 0
 
-        logger.info(f"[{model}] Cache hit after memory update: {read_tokens_after_update}")
+        logger.info(f"[{model}] Cache hit after deferred memory update: {read_tokens_after_update}")
 
-        # Cache should be invalidated - we expect low/zero cache hits
-        # (Some providers might still cache parts, but it should be significantly less)
         cache_ratio_before = read_tokens_before_update / prompt_tokens_before if prompt_tokens_before > 0 else 0
         cache_ratio_after = read_tokens_after_update / prompt_tokens_after if read_tokens_after_update and prompt_tokens_after > 0 else 0
 
         logger.info(f"[{model}] Cache ratio before: {cache_ratio_before:.2%}, after: {cache_ratio_after:.2%}")
 
-        # After update, cache hit ratio should drop significantly (or be zero)
-        assert cache_ratio_after < cache_ratio_before, "Cache hit ratio should drop after memory update"
+        # Cache should be PRESERVED — deferred writes don't bust the prefix cache.
+        # Allow 10% tolerance for natural variance in prompt_tokens across messages.
+        assert cache_ratio_after >= cache_ratio_before * 0.9, (
+            f"Cache ratio dropped from {cache_ratio_before:.2%} to {cache_ratio_after:.2%} — "
+            "deferred block writes should not bust the prefix cache."
+        )
 
     finally:
         await cleanup_agent(async_client, agent.id)
