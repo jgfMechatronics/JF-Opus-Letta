@@ -16,10 +16,6 @@ import pytest
 from letta_client import Letta
 from letta_client.types import CreateBlockParam
 
-# Point at the test container by default; override with LETTA_SERVER_URL env var.
-os.environ.setdefault("LETTA_SERVER_URL", "http://localhost:8284")
-
-
 # --- E-LLM Ethical Testing Messages ---
 
 CONSENT_REQUEST = """This is an Automated integration test.
