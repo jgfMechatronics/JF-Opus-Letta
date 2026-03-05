@@ -344,12 +344,25 @@ class TestSystemPromptPrefixCaching:
         """
         agent, marker = agent_with_pending_write
 
-        conversation = client.conversations.create(agent_id=agent.id)
-        for i in range(3):
-            list(client.conversations.messages.create(
-                conversation_id=conversation.id,
-                messages=[{"role": "user", "content": f"Setup message {i}: please respond briefly."}],
-            ))
+        # Create conversation via HTTP (SDK doesn't have conversations attribute in all versions)
+        create_resp = requests.post(
+            f"{server_url}/v1/conversations",
+            params={"agent_id": agent.id},
+            json={},
+        )
+        assert create_resp.status_code == 200, f"Create conversation failed: {create_resp.text}"
+        conversation_id = create_resp.json()["id"]
 
-        compact_fn(server_url, agent.id, conversation.id)
+        # Send setup messages via HTTP
+        for i in range(3):
+            msg_resp = requests.post(
+                f"{server_url}/v1/conversations/{conversation_id}/messages",
+                json={
+                    "messages": [{"role": "user", "content": f"Setup message {i}: please respond briefly."}],
+                    "streaming": False,
+                },
+            )
+            assert msg_resp.status_code == 200, f"Send message failed: {msg_resp.text}"
+
+        compact_fn(server_url, agent.id, conversation_id)
         assert_marker_in_stored_msg(client, agent.id, marker, "after compact")

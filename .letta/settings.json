@@ -5,7 +5,9 @@
       "Bash(python C:\\Git\\LettaTelegramLocal\\invoke_agent.py:*)",
       "Edit(tests/**)",
       "Bash(cd \"C:\\Git\\LettaServerTest\" && .\\.venv\\Scripts\\Activate.ps1 && $env:LETTA_SERVER_URL=\"http://localhost:8284\" && python -m pytest tests/integration_test_system_prompt_prefix_caching.py -v 2>&1)",
-      "Bash(cd \"C:\\Git\\LettaServerTest\"; .\\.venv\\Scripts\\Activate.ps1; $env:LETTA_SERVER_URL=\"http://localhost:8284\"; python -m pytest tests/integration_test_system_prompt_prefix_caching.py -v 2>&1)"
+      "Bash(cd \"C:\\Git\\LettaServerTest\"; .\\.venv\\Scripts\\Activate.ps1; $env:LETTA_SERVER_URL=\"http://localhost:8284\"; python -m pytest tests/integration_test_system_prompt_prefix_caching.py -v 2>&1)",
+      "Bash(cd C:\\Git\\LettaServerTest && $env:PATH += \";$env:USERPROFILE\\.local\\bin\" ; $env:LETTA_SERVER_URL = \"http://localhost:8284\" ; uv run pytest -s tests/integration_test_system_prompt_prefix_caching.py -v 2>&1)",
+      "Bash($env:PATH += \";$env:USERPROFILE\\.local\\bin\" ; $env:LETTA_SERVER_URL = \"http://localhost:8284\" ; uv run pytest -s tests/integration_test_system_prompt_prefix_caching.py -v --tb=short 2>&1)"
     ]
   }
 }
