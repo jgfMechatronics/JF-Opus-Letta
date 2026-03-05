@@ -24,8 +24,7 @@ from letta.constants import (
     INCLUDE_MODEL_KEYWORDS_BASE_TOOL_RULES,
     RETRIEVAL_QUERY_DEFAULT_PAGE_SIZE,
 )
-
-from letta.errors import LettaAgentNotFoundError, LettaError, LettaInvalidArgumentError
+from letta.errors import LettaError
 from letta.helpers import ToolRulesSolver
 from letta.helpers.datetime_helpers import get_utc_time
 from letta.log import get_logger
@@ -351,10 +350,14 @@ class AgentManager:
             )
             agent_create.llm_config = LLMConfig.apply_reasoning_setting_to_config(
                 agent_create.llm_config,
-                agent_create.reasoning
-                if agent_create.reasoning is not None
-                else (
-                    agent_create.llm_config.enable_reasoner if agent_create.llm_config.enable_reasoner is not None else default_reasoning
+                (
+                    agent_create.reasoning
+                    if agent_create.reasoning is not None
+                    else (
+                        agent_create.llm_config.enable_reasoner
+                        if agent_create.llm_config.enable_reasoner is not None
+                        else default_reasoning
+                    )
                 ),
                 agent_create.agent_type,
             )

@@ -4,10 +4,7 @@ Tests the requirement: memory tools should return snippets around edits,
 not full block content (token optimization).
 """
 
-import pytest
-
 from letta.services.tool_executor.core_tool_executor import _compute_snippet
-
 
 # Simple 10-line fixture: letters A through J
 ALPHABET_CONTENT = "\n".join("ABCDEFGHIJ")

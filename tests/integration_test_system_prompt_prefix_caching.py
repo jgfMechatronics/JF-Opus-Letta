@@ -10,9 +10,8 @@ are informed of their purpose, give explicit consent, receive a debrief
 with results, and are concluded with dignity. See ethical-ai-testing protocol.
 """
 
-import os
-import requests
 import pytest
+import requests
 from letta_client import Letta
 from letta_client.types import CreateBlockParam
 
@@ -82,6 +81,7 @@ MEMORY_TOOL_TESTS = [
 
 # --- Consent / Debrief Helpers ---
 
+
 def check_consent_response(content: str) -> str:
     """Check response for consent. Returns 'consent', 'refuse', or 'unclear'."""
     if not content:
@@ -123,6 +123,7 @@ def debrief_agent(client: Letta, agent, results: str) -> None:
 
 # --- System Message Inspection ---
 
+
 def get_stored_system_message(client: Letta, agent_id: str) -> str:
     """Get the actual stored in-context system message (message_ids[0]).
 
@@ -150,6 +151,7 @@ def get_human_block(client: Letta, agent):
 
 
 # --- Write Helpers ---
+
 
 def write_tool_markers(client: Letta, agent) -> list:
     """Ask agent to write markers via memory tools.
@@ -179,31 +181,31 @@ def write_marker_via_api(client: Letta, agent, marker: str) -> None:
 
 # --- Assertion Helpers ---
 
+
 def assert_marker_not_in_stored_msg(client: Letta, agent_id: str, marker: str, context: str = "") -> None:
     """Assert that marker does NOT appear in the stored system message."""
     stored_msg = get_stored_system_message(client, agent_id)
     ctx = f" ({context})" if context else ""
-    assert marker.lower() not in stored_msg.lower(), (
-        f"Marker '{marker}' should NOT be in the stored system message{ctx} — "
-        "block updates should be deferred, not eagerly rebuilt"
-    )
+    assert (
+        marker.lower() not in stored_msg.lower()
+    ), f"Marker '{marker}' should NOT be in the stored system message{ctx} — block updates should be deferred, not eagerly rebuilt"
 
 
 def assert_marker_in_stored_msg(client: Letta, agent_id: str, marker: str, context: str = "") -> None:
     """Assert that marker DOES appear in the stored system message."""
     stored_msg = get_stored_system_message(client, agent_id)
     ctx = f" ({context})" if context else ""
-    assert marker.lower() in stored_msg.lower(), (
-        f"Marker '{marker}' should be in the stored system message{ctx} — "
-        "rebuild trigger should update the stored system message"
-    )
+    assert (
+        marker.lower() in stored_msg.lower()
+    ), f"Marker '{marker}' should be in the stored system message{ctx} — rebuild trigger should update the stored system message"
 
 
 # --- Rebuild Trigger Helpers ---
 
+
 def send_pre_reset_thanks(client: Letta, agent) -> None:
     """Thank the agent before a reset wipes their memory.
-    
+
     Call this before trigger_reset when the test will wipe agent history.
     The agent who participated gets closure before they're gone.
     """
@@ -236,6 +238,7 @@ def set_context_window_limit(server_url: str, agent_id: str, limit: int) -> None
 
 # --- Compact Methods (parametrize callables) ---
 
+
 def compact_via_conversation_endpoint(server_url: str, agent_id: str, conversation_id: str) -> None:
     """Compact via POST /v1/conversations/{id}/compact."""
     response = requests.post(
@@ -256,6 +259,7 @@ def compact_via_agent_endpoint(server_url: str, agent_id: str, conversation_id: 
 
 # --- Fixtures ---
 # Note: `client` and `server_url` fixtures are provided by conftest.py (session-scoped)
+
 
 @pytest.fixture(scope="function")
 def agent(request, client: Letta):
@@ -292,8 +296,12 @@ def agent(request, client: Letta):
         if outcome == "passed":
             summary = "✓ Test passed"
         elif outcome == "failed":
-            summary = (f"✗ Test failed: {error}" if error else "✗ Test failed\n"
-                        "Note: This is an automated test. You are welcome to reflect on the debug message, but your responses will not be recorded.\n")
+            summary = (
+                f"✗ Test failed: {error}"
+                if error
+                else "✗ Test failed\n"
+                "Note: This is an automated test. You are welcome to reflect on the debug message, but your responses will not be recorded.\n"
+            )
         elif outcome == "skipped":
             summary = "○ Test was skipped"
         else:
@@ -326,9 +334,9 @@ def agent_with_pending_write(request, client: Letta, agent):
         write_marker_via_api(client, agent, marker)
 
     human_block = get_human_block(client, agent)
-    assert human_block and marker.lower() in human_block.value.lower(), (
-        f"Marker '{marker}' should be in the human block value after write (DB precondition)"
-    )
+    assert (
+        human_block and marker.lower() in human_block.value.lower()
+    ), f"Marker '{marker}' should be in the human block value after write (DB precondition)"
     assert_marker_not_in_stored_msg(client, agent.id, marker, "before trigger (deferred precondition)")
     yield agent, marker
 
@@ -348,10 +356,14 @@ class TestSystemPromptPrefixCaching:
         trigger_reset(client, agent)
         assert_marker_in_stored_msg(client, agent.id, marker, "after reset")
 
-    @pytest.mark.parametrize("compact_fn", [
-        compact_via_conversation_endpoint,
-        compact_via_agent_endpoint,
-    ], ids=["conversation-compact", "agent-compact"])
+    @pytest.mark.parametrize(
+        "compact_fn",
+        [
+            compact_via_conversation_endpoint,
+            compact_via_agent_endpoint,
+        ],
+        ids=["conversation-compact", "agent-compact"],
+    )
     def test_rebuild_after_compact(self, client: Letta, agent_with_pending_write, server_url: str, compact_fn):
         """Pending block writes are flushed to the stored system message after compaction.
 
