@@ -218,15 +218,24 @@ def trigger_reset(client: Letta, agent) -> None:
     client.agents.messages.reset(agent.id)
 
 
-def trigger_compact(server_url: str, conversation_id: str) -> None:
-    """Compact a conversation via the REST endpoint (mode=all for a single summary message)."""
+# --- Compact Methods (parametrize callables) ---
+
+def compact_via_conversation_endpoint(server_url: str, agent_id: str, conversation_id: str) -> None:
+    """Compact via POST /v1/conversations/{id}/compact."""
     response = requests.post(
         f"{server_url}/v1/conversations/{conversation_id}/compact",
         json={"compaction_settings": {"mode": "all"}},
     )
-    assert response.status_code == 200, (
-        f"Compact endpoint returned {response.status_code}: {response.text}"
+    assert response.status_code == 200, f"Compact returned {response.status_code}: {response.text}"
+
+
+def compact_via_agent_endpoint(server_url: str, agent_id: str, conversation_id: str) -> None:
+    """Compact via POST /v1/agents/{id}/summarize — the endpoint hit by Letta Code's /compact."""
+    response = requests.post(
+        f"{server_url}/v1/agents/{agent_id}/summarize",
+        json={"compaction_settings": {"mode": "all"}},
     )
+    assert response.status_code == 200, f"Summarize returned {response.status_code}: {response.text}"
 
 
 # --- Fixtures ---
@@ -323,24 +332,24 @@ class TestSystemPromptPrefixCaching:
         trigger_reset(client, agent)
         assert_marker_in_stored_msg(client, agent.id, marker, "after reset")
 
-    def test_rebuild_after_compact(self, client: Letta, agent_with_pending_write, server_url: str):
-        """Pending block writes are flushed to the stored system message after conversation compaction.
+    @pytest.mark.parametrize("compact_fn", [
+        compact_via_conversation_endpoint,
+        compact_via_agent_endpoint,
+    ], ids=["conversation-compact", "agent-compact"])
+    def test_rebuild_after_compact(self, client: Letta, agent_with_pending_write, server_url: str, compact_fn):
+        """Pending block writes are flushed to the stored system message after compaction.
 
-        Runs for both write methods (parametrized): tool-write and api-write.
-        The deferred precondition (marker not yet in stored message) is asserted by the fixture.
-
-        Conversation messages are sent after the fixture write. With the Sarah Wooders
-        prefix-cache optimization, _rebuild_memory does not fire during steps — so the
-        stored message stays stale regardless of message order, until the explicit compact.
+        Parametrized over write method (tool/api) and compact method (conversation/agent endpoint),
+        giving 4 test cases total. The deferred precondition is asserted by the fixture.
         """
         agent, marker = agent_with_pending_write
 
         conversation = client.conversations.create(agent_id=agent.id)
-        for i in range(5):
+        for i in range(3):
             list(client.conversations.messages.create(
                 conversation_id=conversation.id,
                 messages=[{"role": "user", "content": f"Setup message {i}: please respond briefly."}],
             ))
 
-        trigger_compact(server_url, conversation.id)
+        compact_fn(server_url, agent.id, conversation.id)
         assert_marker_in_stored_msg(client, agent.id, marker, "after compact")

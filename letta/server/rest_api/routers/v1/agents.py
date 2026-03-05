@@ -2442,6 +2442,17 @@ async def summarize_messages(
             detail="Summarization failed to reduce the number of messages. You may need to use a different CompactionSettings (e.g. using `all` mode).",
         )
     await agent_loop._checkpoint_messages(run_id=None, step_id=None, new_messages=[summary_message], in_context_messages=messages)
+
+    # Rebuild system prompt to ensure memory blocks are current
+    # In-step compaction already does this (letta_agent_v3.py lines 1033, 1253);
+    # this brings the REST endpoint into parity.
+    await server.agent_manager.rebuild_system_prompt_async(
+        agent_id=agent_id,
+        actor=actor,
+        force=True,
+        update_timestamp=True,
+    )
+
     return CompactionResponse(
         summary=summary,
         num_messages_before=num_messages_before,
