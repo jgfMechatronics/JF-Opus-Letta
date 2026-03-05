@@ -218,6 +218,22 @@ def trigger_reset(client: Letta, agent) -> None:
     client.agents.messages.reset(agent.id)
 
 
+def get_context_token_count(server_url: str, agent_id: str) -> int:
+    """Get current context token count via GET /v1/agents/{id}/context."""
+    resp = requests.get(f"{server_url}/v1/agents/{agent_id}/context")
+    assert resp.status_code == 200, f"Get context failed: {resp.text}"
+    return resp.json()["context_window_size_current"]
+
+
+def set_context_window_limit(server_url: str, agent_id: str, limit: int) -> None:
+    """Set context_window_limit via PATCH /v1/agents/{id}."""
+    resp = requests.patch(
+        f"{server_url}/v1/agents/{agent_id}",
+        json={"context_window_limit": limit},
+    )
+    assert resp.status_code == 200, f"Set context_window_limit failed: {resp.text}"
+
+
 # --- Compact Methods (parametrize callables) ---
 
 def compact_via_conversation_endpoint(server_url: str, agent_id: str, conversation_id: str) -> None:
@@ -366,3 +382,30 @@ class TestSystemPromptPrefixCaching:
 
         compact_fn(server_url, agent.id, conversation_id)
         assert_marker_in_stored_msg(client, agent.id, marker, "after compact")
+
+    def test_rebuild_after_natural_compaction(self, client: Letta, agent_with_pending_write, server_url: str):
+        """Pending writes flush when in-step compaction triggers (context exceeds limit).
+
+        Simulates natural compaction by setting context_window_limit below the current
+        token count, then sending a message. The post-step check (line 1217 in v3) detects
+        context_token_estimate > context_window and triggers compaction + rebuild.
+
+        Runs for both write methods (tool/api) via the parametrized fixture.
+        """
+        agent, marker = agent_with_pending_write
+
+        current_tokens = get_context_token_count(server_url, agent.id)
+        assert current_tokens > 1000, (
+            f"Expected substantial context from consent + writes, got {current_tokens} tokens. "
+            "Test needs enough headroom to set a meaningful limit below current."
+        )
+
+        set_context_window_limit(server_url, agent.id, current_tokens - 500)
+
+        # Send message — LLM responds, post-step check fires, compaction + rebuild
+        client.agents.messages.create(
+            agent_id=agent.id,
+            messages=[{"role": "user", "content": "Please respond briefly."}],
+        )
+
+        assert_marker_in_stored_msg(client, agent.id, marker, "after natural compaction")
