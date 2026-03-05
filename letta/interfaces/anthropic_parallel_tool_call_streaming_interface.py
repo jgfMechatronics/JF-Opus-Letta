@@ -531,20 +531,6 @@ class SimpleAnthropicStreamingInterface:
                 if self.cache_creation_tokens:
                     self.raw_usage["cache_creation_input_tokens"] = self.cache_creation_tokens
 
-            # Log cache statistics for diagnostics
-            total_input = self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens
-            cache_pct = (self.cache_read_tokens / total_input * 100) if total_input > 0 else 0.0
-            logger.info(
-                "[Anthropic] Model: %s | Message ID: %s | In: %d, Out: %d | Cache read: %d, write: %d | Hit: %.1f%%",
-                self.model,
-                self.message_id,
-                self.input_tokens,
-                self.output_tokens,
-                self.cache_read_tokens,
-                self.cache_creation_tokens,
-                cache_pct,
-            )
-
         elif isinstance(event, BetaRawContentBlockStopEvent):
             # Finalize the tool_use block at this index using accumulated deltas
             ctx = self.active_tool_uses.pop(event.index, None)

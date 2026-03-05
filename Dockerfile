@@ -36,9 +36,6 @@ COPY pyproject.toml uv.lock ./
 # Then copy the rest of the application code
 COPY . .
 
-# Strip Windows CRLF line endings from shell scripts (safe on Linux-checked-out files too)
-RUN find /app -name "*.sh" -exec sed -i 's/\r$//' {} +
-
 RUN uv sync --frozen --no-dev --all-extras --python 3.11
 
 # Runtime stage
