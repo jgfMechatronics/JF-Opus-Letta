@@ -23,6 +23,24 @@ from letta.utils import get_friendly_error_msg
 logger = get_logger(__name__)
 
 
+def _compute_snippet(content: str, edit_start_line: int, edit_line_count: int, context_lines: int = 3) -> str:
+    """Extract a snippet of content around an edited region.
+
+    Args:
+        content: The full content (after edit) to extract from
+        edit_start_line: 0-indexed line number where the edit begins
+        edit_line_count: Number of lines the edit spans
+        context_lines: Number of lines of context before/after
+
+    Returns:
+        A string containing the snippet with context around the edit
+    """
+    lines = content.split("\n")
+    start = max(0, edit_start_line - context_lines)
+    end = min(len(lines), edit_start_line + edit_line_count + context_lines)
+    return "\n".join(lines[start:end])
+
+
 class LettaCoreToolExecutor(ToolExecutor):
     """Executor for LETTA core tools with direct implementation of functions."""
 
@@ -313,7 +331,6 @@ class LettaCoreToolExecutor(ToolExecutor):
             actor=actor,
             tags=tags,
         )
-        await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
         return None
 
     async def core_memory_append(self, agent_state: AgentState, actor: User, label: str, content: str) -> str:
@@ -393,12 +410,17 @@ class LettaCoreToolExecutor(ToolExecutor):
         # Replace old_string with new_string
         new_value = current_value.replace(str(old_string), str(new_string))
 
+        # Compute snippet around the edit
+        replacement_line = current_value.split(old_string)[0].count("\n")
+        edit_line_count = len(new_string.split("\n"))
+        snippet = _compute_snippet(new_value, replacement_line, edit_line_count)
+
         # Write the new content to the block
         agent_state.memory.update_block_value(label=label, value=new_value)
 
         await self.agent_manager.update_memory_if_changed_async(agent_id=agent_state.id, new_memory=agent_state.memory, actor=actor)
 
-        return new_value
+        return snippet
 
     async def memory_apply_patch(self, agent_state: AgentState, actor: User, label: str, patch: str) -> str:
         """Apply a simplified unified-diff style patch to one or more memory blocks.
@@ -719,26 +741,20 @@ class LettaCoreToolExecutor(ToolExecutor):
                 f"append to the end of the memory block."
             )
 
-        # Insert the new string as a line
-        SNIPPET_LINES = 3
+        # Insert the new string as lines
         new_string_lines = new_string.split("\n")
         new_value_lines = current_value_lines[:insert_line] + new_string_lines + current_value_lines[insert_line:]
-        snippet_lines = (
-            current_value_lines[max(0, insert_line - SNIPPET_LINES) : insert_line]
-            + new_string_lines
-            + current_value_lines[insert_line : insert_line + SNIPPET_LINES]
-        )
-
-        # Collate into the new value to update
         new_value = "\n".join(new_value_lines)
-        "\n".join(snippet_lines)
+
+        # Compute snippet around the edit
+        snippet = _compute_snippet(new_value, insert_line, len(new_string_lines))
 
         # Write into the block
         agent_state.memory.update_block_value(label=label, value=new_value)
 
         await self.agent_manager.update_memory_if_changed_async(agent_id=agent_state.id, new_memory=agent_state.memory, actor=actor)
 
-        return new_value
+        return snippet
 
     async def memory_rethink(self, agent_state: AgentState, actor: User, label: str, new_memory: str) -> str:
         if agent_state.memory.get_block(label).read_only:
@@ -818,7 +834,6 @@ class LettaCoreToolExecutor(ToolExecutor):
             await self.block_manager.update_block_async(
                 block_id=memory_block.id, block_update=BlockUpdate(description=description), actor=actor
             )
-            await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
             return (
                 f"Successfully updated description of memory block '{label}'. "
@@ -844,7 +859,6 @@ class LettaCoreToolExecutor(ToolExecutor):
                 raise ValueError(f"Error: Memory block '{old_label}' does not exist")
 
             await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(label=new_label), actor=actor)
-            await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
             return (
                 f"Successfully renamed memory block '{old_label}' to '{new_label}'. "
@@ -938,15 +952,18 @@ class LettaCoreToolExecutor(ToolExecutor):
         # Replace old_string with new_string
         new_value = current_value.replace(str(old_string), str(new_string))
 
+        # Compute snippet around the edit
+        replacement_line = current_value.split(old_string)[0].count("\n")
+        edit_line_count = len(new_string.split("\n"))
+        snippet = _compute_snippet(new_value, replacement_line, edit_line_count)
+
         # Write the new content to the block
         await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(value=new_value), actor=actor)
 
         # Keep in-memory AgentState consistent with DB
         agent_state.memory.update_block_value(label=label, value=new_value)
 
-        await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
-
-        return new_value
+        return snippet
 
     async def memory_str_insert(self, agent_state: AgentState, actor: User, path: str, insert_text: str, insert_line: int = -1) -> str:
         """Insert text into a memory block at a specific line."""
@@ -999,7 +1016,7 @@ class LettaCoreToolExecutor(ToolExecutor):
 
         # Collate into the new value to update
         new_value = "\n".join(new_value_lines)
-        "\n".join(snippet_lines)
+        snippet = "\n".join(snippet_lines)
 
         # Write into the block
         await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(value=new_value), actor=actor)
@@ -1007,9 +1024,7 @@ class LettaCoreToolExecutor(ToolExecutor):
         # Keep in-memory AgentState consistent with DB
         agent_state.memory.update_block_value(label=label, value=new_value)
 
-        await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
-
-        return new_value
+        return snippet
 
     async def memory(
         self,
