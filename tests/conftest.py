@@ -18,6 +18,23 @@ from letta.services.user_manager import UserManager
 
 def pytest_configure(config):
     logging.basicConfig(level=logging.DEBUG)
+    # Register custom markers
+    config.addinivalue_line("markers", "skip_debrief: Test handles its own agent debrief (e.g., before a reset wipes history)")
+
+
+# --- Test Result Capture Hook ---
+# Stores test outcome on the node so fixtures can access it during teardown.
+# Usage in fixture: request.node.test_outcome ("passed", "failed", or "skipped")
+#                   request.node.test_error (exception message if failed, else None)
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+
+    # We only care about the "call" phase (the actual test), not setup/teardown
+    if report.when == "call":
+        item.test_outcome = report.outcome  # "passed", "failed", or "skipped"
+        item.test_error = str(report.longrepr) if report.failed else None
 
 
 @pytest.fixture(scope="session")
