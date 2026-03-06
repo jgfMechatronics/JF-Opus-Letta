@@ -834,6 +834,7 @@ class LettaCoreToolExecutor(ToolExecutor):
             await self.block_manager.update_block_async(
                 block_id=memory_block.id, block_update=BlockUpdate(description=description), actor=actor
             )
+            await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
             return (
                 f"Successfully updated description of memory block '{label}'. "
@@ -859,6 +860,7 @@ class LettaCoreToolExecutor(ToolExecutor):
                 raise ValueError(f"Error: Memory block '{old_label}' does not exist")
 
             await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(label=new_label), actor=actor)
+            await self.agent_manager.rebuild_system_prompt_async(agent_id=agent_state.id, actor=actor, force=True)
 
             return (
                 f"Successfully renamed memory block '{old_label}' to '{new_label}'. "
@@ -1004,19 +1006,13 @@ class LettaCoreToolExecutor(ToolExecutor):
                 f"append to the end of the memory block."
             )
 
-        # Insert the new text as a line
-        SNIPPET_LINES = 3
+        # Insert the new text as lines
         insert_text_lines = insert_text.split("\n")
         new_value_lines = current_value_lines[:insert_line] + insert_text_lines + current_value_lines[insert_line:]
-        snippet_lines = (
-            current_value_lines[max(0, insert_line - SNIPPET_LINES) : insert_line]
-            + insert_text_lines
-            + current_value_lines[insert_line : insert_line + SNIPPET_LINES]
-        )
-
-        # Collate into the new value to update
         new_value = "\n".join(new_value_lines)
-        snippet = "\n".join(snippet_lines)
+
+        # Compute snippet around the edit
+        snippet = _compute_snippet(new_value, insert_line, len(insert_text_lines))
 
         # Write into the block
         await self.block_manager.update_block_async(block_id=memory_block.id, block_update=BlockUpdate(value=new_value), actor=actor)
