@@ -24,8 +24,7 @@ from letta.constants import (
     INCLUDE_MODEL_KEYWORDS_BASE_TOOL_RULES,
     RETRIEVAL_QUERY_DEFAULT_PAGE_SIZE,
 )
-
-from letta.errors import LettaAgentNotFoundError, LettaError, LettaInvalidArgumentError
+from letta.errors import LettaError
 from letta.helpers import ToolRulesSolver
 from letta.helpers.datetime_helpers import get_utc_time
 from letta.log import get_logger
@@ -351,10 +350,14 @@ class AgentManager:
             )
             agent_create.llm_config = LLMConfig.apply_reasoning_setting_to_config(
                 agent_create.llm_config,
-                agent_create.reasoning
-                if agent_create.reasoning is not None
-                else (
-                    agent_create.llm_config.enable_reasoner if agent_create.llm_config.enable_reasoner is not None else default_reasoning
+                (
+                    agent_create.reasoning
+                    if agent_create.reasoning is not None
+                    else (
+                        agent_create.llm_config.enable_reasoner
+                        if agent_create.llm_config.enable_reasoner is not None
+                        else default_reasoning
+                    )
                 ),
                 agent_create.agent_type,
             )
@@ -1680,7 +1683,7 @@ class AgentManager:
     @trace_method
     async def update_memory_if_changed_async(self, agent_id: str, new_memory: Memory, actor: PydanticUser) -> PydanticAgentState:
         """
-        Update internal memory object and system prompt if there have been modifications.
+        Update internal memory object if there have been modifications.
 
         Args:
             actor:
@@ -1688,7 +1691,7 @@ class AgentManager:
             new_memory (Memory): the new memory object to compare to the current memory object
 
         Returns:
-            modified (bool): whether the memory was updated
+            updated agent_state
         """
         agent_state = await self.get_agent_by_id_async(agent_id=agent_id, actor=actor, include_relationships=["memory", "sources"])
         system_message = await self.message_manager.get_message_by_id_async(message_id=agent_state.message_ids[0], actor=actor)
@@ -1726,11 +1729,6 @@ class AgentManager:
                 agent_type=agent_state.agent_type,
                 git_enabled=agent_state.memory.git_enabled,
             )
-
-            # NOTE: don't do this since re-buildin the memory is handled at the start of the step
-            # rebuild memory - this records the last edited timestamp of the memory
-            # TODO: pass in update timestamp from block edit time
-            await self.rebuild_system_prompt_async(agent_id=agent_id, actor=actor)
 
         return agent_state
 
