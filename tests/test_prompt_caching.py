@@ -275,7 +275,7 @@ async def create_agent_with_large_memory(client: AsyncLetta, model: str, model_s
     agent = await client.agents.create(
         name=f"cache-test-{clean_suffix}-{uuid.uuid4().hex[:8]}",
         model=model,
-        embedding="openai/text-embedding-3-small",
+        embedding="letta/letta-free",
         memory_blocks=[
             CreateBlockParam(
                 label="persona",
@@ -565,8 +565,8 @@ async def test_prompt_caching_cache_preserved_on_deferred_memory_update(
         assert read_tokens_before_update is not None and read_tokens_before_update > 0, "Should have cache hit before update"
 
         # Update memory block via API (deferred — does NOT trigger a system prompt rebuild)
-        agent = await async_client.agents.get(agent_id=agent.id)
-        persona_block = next((b for b in agent.memory_blocks if b.label == "persona"), None)
+        agent_blocks = await async_client.agents.blocks.list(agent_id=agent.id)
+        persona_block = next((b for b in agent_blocks.items if b.label == "persona"), None)
         assert persona_block is not None, "Should have persona block"
 
         await async_client.blocks.update(
