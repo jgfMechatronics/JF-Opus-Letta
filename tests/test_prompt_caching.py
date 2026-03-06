@@ -275,7 +275,7 @@ async def create_agent_with_large_memory(client: AsyncLetta, model: str, model_s
     agent = await client.agents.create(
         name=f"cache-test-{clean_suffix}-{uuid.uuid4().hex[:8]}",
         model=model,
-        embedding="openai/text-embedding-3-small",
+        embedding="letta/letta-free",
         memory_blocks=[
             CreateBlockParam(
                 label="persona",
@@ -332,16 +332,16 @@ def assert_usage_sanity(usage, context: str = ""):
     if usage.cache_write_tokens is not None and usage.cache_write_tokens > 0:
         # Cache write shouldn't exceed total input
         total_input = (usage.prompt_tokens or 0) + (usage.cache_write_tokens or 0) + (usage.cached_input_tokens or 0)
-        assert usage.cache_write_tokens <= total_input, (
-            f"{prefix}cache_write_tokens ({usage.cache_write_tokens}) > total input ({total_input})"
-        )
+        assert (
+            usage.cache_write_tokens <= total_input
+        ), f"{prefix}cache_write_tokens ({usage.cache_write_tokens}) > total input ({total_input})"
 
     if usage.cached_input_tokens is not None and usage.cached_input_tokens > 0:
         # Cached input shouldn't exceed prompt tokens + cached
         total_input = (usage.prompt_tokens or 0) + (usage.cached_input_tokens or 0)
-        assert usage.cached_input_tokens <= total_input, (
-            f"{prefix}cached_input_tokens ({usage.cached_input_tokens}) exceeds reasonable bounds"
-        )
+        assert (
+            usage.cached_input_tokens <= total_input
+        ), f"{prefix}cached_input_tokens ({usage.cached_input_tokens}) exceeds reasonable bounds"
 
 
 # ------------------------------
@@ -410,9 +410,9 @@ async def test_prompt_caching_cache_write_then_read(
             logger.info(f"[{model}] Cache write tokens on message 1: {write_tokens}")
             # Anthropic should show cache creation on first message
             if "anthropic" in model:
-                assert write_tokens is not None and write_tokens > 0, (
-                    f"Anthropic should create cache on first message, got cache_write_tokens={write_tokens}"
-                )
+                assert (
+                    write_tokens is not None and write_tokens > 0
+                ), f"Anthropic should create cache on first message, got cache_write_tokens={write_tokens}"
 
         # Message 2: Follow-up with same agent/context should trigger cache HIT
         response2 = await async_client.agents.messages.create(
@@ -433,9 +433,9 @@ async def test_prompt_caching_cache_write_then_read(
         read_tokens = response2.usage.cached_input_tokens
         logger.info(f"[{model}] Cache read tokens on message 2: {read_tokens}")
 
-        assert read_tokens is not None and read_tokens > 0, (
-            f"Provider {model} should have cache hit on message 2, got cached_input_tokens={read_tokens}. This means caching is NOT working!"
-        )
+        assert (
+            read_tokens is not None and read_tokens > 0
+        ), f"Provider {model} should have cache hit on message 2, got cached_input_tokens={read_tokens}. This means caching is NOT working!"
 
         # The cached amount should be significant (most of the prompt)
         # Allow some variance for conversation history, but expect >50% cache hit
@@ -448,9 +448,9 @@ async def test_prompt_caching_cache_write_then_read(
 
         # Note: With thinking mode enabled, Anthropic may have lower cache ratios due to
         # thinking blocks changing between messages. The key assertion is that SOME caching occurs.
-        assert cache_hit_ratio >= 0.15, (
-            f"Expected >15% cache hit ratio, got {cache_hit_ratio:.2%}. Some portion of prompt should be cached!"
-        )
+        assert (
+            cache_hit_ratio >= 0.15
+        ), f"Expected >15% cache hit ratio, got {cache_hit_ratio:.2%}. Some portion of prompt should be cached!"
 
     finally:
         await cleanup_agent(async_client, agent.id)
@@ -509,9 +509,9 @@ async def test_prompt_caching_multiple_messages(
             assert responses[i].usage is not None, f"Message {i + 1} should have usage"
 
             read_tokens = responses[i].usage.cached_input_tokens
-            assert read_tokens is not None and read_tokens > 0, (
-                f"Message {i + 1} should have cache hit, got cached_input_tokens={read_tokens}"
-            )
+            assert (
+                read_tokens is not None and read_tokens > 0
+            ), f"Message {i + 1} should have cache hit, got cached_input_tokens={read_tokens}"
 
     finally:
         await cleanup_agent(async_client, agent.id)
@@ -519,7 +519,7 @@ async def test_prompt_caching_multiple_messages(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,model_settings,min_tokens,read_field,write_field", CACHING_TEST_CONFIGS)
-async def test_prompt_caching_cache_invalidation_on_memory_update(
+async def test_prompt_caching_cache_preserved_on_deferred_memory_update(
     async_client: AsyncLetta,
     model: str,
     model_settings: dict,
@@ -528,16 +528,21 @@ async def test_prompt_caching_cache_invalidation_on_memory_update(
     write_field: str,
 ):
     """
-    Test that updating memory blocks invalidates the cache.
+    Test that updating memory blocks does NOT immediately invalidate the cache.
 
-    When memory is modified, the prompt changes, so the cache should miss
-    and a new cache should be created.
+    Memory block writes are deferred — the compiled system prompt is not rebuilt
+    until the next compaction or message reset. This means the prefix cache remains
+    valid across turns even after a block update via the API.
+
+    Cache invalidation on memory update was the old eager-rebuild behavior. The new
+    contract is: block writes are cheap and cache-preserving; the prompt rebuilds
+    lazily at compaction boundaries.
     """
     agent = await create_agent_with_large_memory(
         async_client,
         model,
         model_settings,
-        "cache-invalidation",
+        "cache-deferred",
     )
 
     try:
@@ -559,9 +564,9 @@ async def test_prompt_caching_cache_invalidation_on_memory_update(
         logger.info(f"[{model}] Cache hit before memory update: {read_tokens_before_update}")
         assert read_tokens_before_update is not None and read_tokens_before_update > 0, "Should have cache hit before update"
 
-        # Update memory block (this should invalidate cache)
-        agent = await async_client.agents.get(agent_id=agent.id)
-        persona_block = next((b for b in agent.memory_blocks if b.label == "persona"), None)
+        # Update memory block via API (deferred — does NOT trigger a system prompt rebuild)
+        agent_blocks = await async_client.agents.blocks.list(agent_id=agent.id)
+        persona_block = next((b for b in agent_blocks.items if b.label == "persona"), None)
         assert persona_block is not None, "Should have persona block"
 
         await async_client.blocks.update(
@@ -570,27 +575,29 @@ async def test_prompt_caching_cache_invalidation_on_memory_update(
             value=LARGE_MEMORY_BLOCK + "\n\nADDITIONAL NOTE: You are now extra helpful!",
         )
 
-        # Message 3: After memory update, cache should MISS (then create new cache)
+        # Message 3: After deferred memory update, cache should STILL HIT —
+        # the stored system prompt hasn't changed yet, so the prefix is stable.
         response3 = await async_client.agents.messages.create(
             agent_id=agent.id,
             messages=[MessageCreateParam(role="user", content="What changed?")],
         )
 
-        # After memory update, we expect cache miss (low or zero cache hits)
         read_tokens_after_update = response3.usage.cached_input_tokens if response3.usage else None
         prompt_tokens_after = response3.usage.prompt_tokens if response3.usage else 0
 
-        logger.info(f"[{model}] Cache hit after memory update: {read_tokens_after_update}")
+        logger.info(f"[{model}] Cache hit after deferred memory update: {read_tokens_after_update}")
 
-        # Cache should be invalidated - we expect low/zero cache hits
-        # (Some providers might still cache parts, but it should be significantly less)
         cache_ratio_before = read_tokens_before_update / prompt_tokens_before if prompt_tokens_before > 0 else 0
         cache_ratio_after = read_tokens_after_update / prompt_tokens_after if read_tokens_after_update and prompt_tokens_after > 0 else 0
 
         logger.info(f"[{model}] Cache ratio before: {cache_ratio_before:.2%}, after: {cache_ratio_after:.2%}")
 
-        # After update, cache hit ratio should drop significantly (or be zero)
-        assert cache_ratio_after < cache_ratio_before, "Cache hit ratio should drop after memory update"
+        # Cache should be PRESERVED — deferred writes don't bust the prefix cache.
+        # Allow 10% tolerance for natural variance in prompt_tokens across messages.
+        assert cache_ratio_after >= cache_ratio_before * 0.9, (
+            f"Cache ratio dropped from {cache_ratio_before:.2%} to {cache_ratio_after:.2%} — "
+            "deferred block writes should not bust the prefix cache."
+        )
 
     finally:
         await cleanup_agent(async_client, agent.id)
@@ -798,9 +805,9 @@ async def test_anthropic_cache_control_breakpoints(async_client: AsyncLetta):
         cache_creation = response1.usage.cache_write_tokens
         logger.info(f"[Anthropic] First message cache_write_tokens: {cache_creation}")
 
-        assert cache_creation is not None and cache_creation >= 1024, (
-            f"Anthropic should create cache ≥1024 tokens on first message. Got {cache_creation}. This means cache_control breakpoints are NOT being added!"
-        )
+        assert (
+            cache_creation is not None and cache_creation >= 1024
+        ), f"Anthropic should create cache ≥1024 tokens on first message. Got {cache_creation}. This means cache_control breakpoints are NOT being added!"
 
         # Send multiple follow-up messages to increase chance of cache hit
         follow_up_messages = [
@@ -828,9 +835,9 @@ async def test_anthropic_cache_control_breakpoints(async_client: AsyncLetta):
         max_cached = max(cached_token_counts) if cached_token_counts else 0
         logger.info(f"[Anthropic] Max cached tokens across {len(cached_token_counts)} messages: {max_cached}")
 
-        assert max_cached > 0, (
-            f"Anthropic should read from cache in at least one of {len(follow_up_messages)} follow-up messages. Got max={max_cached}. Cache reads are NOT working!"
-        )
+        assert (
+            max_cached > 0
+        ), f"Anthropic should read from cache in at least one of {len(follow_up_messages)} follow-up messages. Got max={max_cached}. Cache reads are NOT working!"
 
     finally:
         await cleanup_agent(async_client, agent.id)
@@ -866,9 +873,9 @@ async def test_openai_automatic_caching(async_client: AsyncLetta):
         cached_tokens_2 = response2.usage.cached_input_tokens if response2.usage else None
         logger.info(f"[OpenAI] Second message cached_input_tokens: {cached_tokens_2}")
 
-        assert cached_tokens_2 is not None and cached_tokens_2 >= 1024, (
-            f"OpenAI should cache ≥1024 tokens automatically on second message. Got {cached_tokens_2}. Automatic caching is NOT working!"
-        )
+        assert (
+            cached_tokens_2 is not None and cached_tokens_2 >= 1024
+        ), f"OpenAI should cache ≥1024 tokens automatically on second message. Got {cached_tokens_2}. Automatic caching is NOT working!"
 
         # Cached tokens should be in 128-token increments
         assert cached_tokens_2 % 128 == 0, f"OpenAI cached_input_tokens should be in 128-token increments, got {cached_tokens_2}"
@@ -906,9 +913,9 @@ async def test_gemini_2_5_flash_implicit_caching(async_client: AsyncLetta):
         cached_tokens = response2.usage.cached_input_tokens if response2.usage else None
         logger.info(f"[Gemini 2.5 Flash] Second message cached_input_tokens: {cached_tokens}")
 
-        assert cached_tokens is not None and cached_tokens >= 1024, (
-            f"Gemini 2.5 Flash should implicitly cache ≥1024 tokens on second message. Got {cached_tokens}. Implicit caching is NOT working!"
-        )
+        assert (
+            cached_tokens is not None and cached_tokens >= 1024
+        ), f"Gemini 2.5 Flash should implicitly cache ≥1024 tokens on second message. Got {cached_tokens}. Implicit caching is NOT working!"
 
     finally:
         await cleanup_agent(async_client, agent.id)
@@ -962,9 +969,9 @@ async def test_gemini_3_pro_preview_implicit_caching(async_client: AsyncLetta):
         max_cached = max(cached_token_counts) if cached_token_counts else 0
         logger.info(f"[Gemini 3 Pro] Max cached tokens across {len(cached_token_counts)} messages: {max_cached}")
 
-        assert max_cached >= 2048, (
-            f"Gemini 3 Pro Preview should implicitly cache ≥2048 tokens in at least one of {len(follow_up_messages)} messages. Got max={max_cached}. Implicit caching is NOT working!"
-        )
+        assert (
+            max_cached >= 2048
+        ), f"Gemini 3 Pro Preview should implicitly cache ≥2048 tokens in at least one of {len(follow_up_messages)} messages. Got max={max_cached}. Implicit caching is NOT working!"
 
     finally:
         await cleanup_agent(async_client, agent.id)
