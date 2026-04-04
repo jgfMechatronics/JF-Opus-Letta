@@ -1,0 +1,50 @@
+Client Tool Code Path — Clean Summary
+
+  ───────────────────────────────
+
+  1. HTTP request arrives → streaming_service.py:138
+  - AgentLoop.load(agent_state, actor) creates fresh `LettaAgentV3` instance
+  - No caching, no reuse
+
+  2. `AgentLoop.load()` → agent_loop.py:40-43
+  - Factory method, returns LettaAgentV3(agent_state, actor)
+  - Instance has self.context_token_estimate = None (line 94)
+
+  3. `stream()` entry → letta_agent_v3.py:349-367
+  - Prepares in_context_messages from DB
+  - Enters step loop: for i in range(max_steps)
+
+  4. `_step()` runs → letta_agent_v3.py:867-872
+  - Makes LLM API call
+  - Sets estimate: self.context_token_estimate = llm_adapter.usage.total_tokens
+
+  5. Client tool detected → letta_agent_v3.py:1147-1174
+  - Checks if tool name is in client_tool_names
+  - Creates approval_request_message
+  - Returns `(messages, False, requires_approval)` — the False stops stepping
+
+  6. Back in `stream()` loop → letta_agent_v3.py:389-400
+  - Warning check runs, but guard blocks (line 393-394): last message is approval_request_message
+  - Line 422-423: if not self.should_continue: break — exits loop
+  - Generator completes, HTTP response finishes
+  - Instance dies, estimate lost
+
+  7. Client executes tool locally
+  - Letta Code runs Bash/Read/etc
+  - Sends NEW HTTP request with approval_response containing tool_returns
+
+  8. New HTTP request → back to step 1
+  - Fresh instance, context_token_estimate = None
+  - _maybe_get_approval_messages() detects this is a continuation (line 675)
+  - Processes tool_returns from client
+
+  9. Warning check fails → letta_agent_v3.py:400
+  - self.context_token_estimate is not None → False (it's None)
+  - Check short-circuits, no warning injected
+  - _step() runs, estimate gets populated... but if another client tool, cycle repeats
+
+
+JF Notes:
+So it does indeed look like we can take the following approach:
+1. Whenever we see we're processing a client side tool_return, do a special memory pressure warning check inside _handle_ai_response
+2. If the check fires (using pretty much all the same logic as the other check in terms of context limit threshold (functionalize this, DRY)), then rather than add a message with a letta system message like we have been doing, just append a message *after* the tool_return. The LLM will see this and then do a memory sweep instead of invoking another client side tool. We also need to be sure to set and persist our flag so that the other warning doesn't still fire. WE can leave the other warning in place for server-side tool execution (I think).

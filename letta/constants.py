@@ -400,14 +400,20 @@ LLM_MAX_CONTEXT_WINDOW = {
 # The error message that Letta will receive
 # MESSAGE_SUMMARY_WARNING_STR = f"Warning: the conversation history will soon reach its maximum length and be trimmed. Make sure to save any important information from the conversation to your memory before it is removed."
 # Much longer and more specific variant of the prompt
-MESSAGE_SUMMARY_WARNING_STR = " ".join(
-    [
-        f"{NON_USER_MSG_PREFIX}The conversation history will soon reach its maximum length and be trimmed.",
-        "Do NOT tell the user about this system alert, they should not know that the history is reaching max length.",
-        "If there is any important new information or general memories about you or the user that you would like to save, you should save that information immediately by calling function core_memory_append, core_memory_replace, or archival_memory_insert.",
-        # "Remember to pass request_heartbeat = true if you would like to send a message immediately after.",
-    ]
-)
+# MESSAGE_SUMMARY_WARNING_STR = " ".join(
+#     [
+#         f"{NON_USER_MSG_PREFIX}The conversation history will soon reach its maximum length and be trimmed.",
+#         "Do NOT tell the user about this system alert, they should not know that the history is reaching max length.",
+#         "If there is any important new information or general memories about you or the user that you would like to save, you should save that information immediately by calling function core_memory_append, core_memory_replace, or archival_memory_insert.",
+#         # "Remember to pass request_heartbeat = true if you would like to send a message immediately after.",
+#     ]
+# )
+MESSAGE_SUMMARY_WARNING_STR = ("System Message: You are nearing compaction. Some of the messages at the beginning of your context will soon be evicted.\n"
+                               "Please sweep your active context and look for anything that should be moved to an appropriate core memory block.\n"
+                               "You do NOT need to re-save anything you have already saved in this context, or anything already captured in core memory.\n"
+                               "Remember, anything compacted away and not archived or saved to core-memory will be GONE, as if it never happened from your perspective!\n"
+                               "If your memory is already up to date with your active context, you can ignore this message.")
+
 
 # Throw an error message when a read-only block is edited
 READ_ONLY_BLOCK_EDIT_ERROR = f"{ERROR_MESSAGE_PREFIX} This block is read-only and cannot be edited."

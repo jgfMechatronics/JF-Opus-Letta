@@ -27,8 +27,8 @@ from letta.helpers.datetime_helpers import get_utc_time, get_utc_timestamp_ns
 from letta.helpers.tool_execution_helper import enable_strict_mode
 from letta.local_llm.constants import INNER_THOUGHTS_KWARG
 from letta.otel.tracing import trace_method
-from letta.schemas.agent import AgentState
-from letta.schemas.enums import LLMCallType
+from letta.schemas.agent import AgentState, UpdateAgent
+from letta.schemas.enums import LLMCallType, MessageRole
 from letta.schemas.letta_message import (
     ApprovalReturn,
     CompactionStats,
@@ -48,6 +48,7 @@ from letta.schemas.openai.chat_completion_response import ChoiceLogprobs, ToolCa
 from letta.schemas.provider_trace import BillingContext
 from letta.schemas.step import StepProgression
 from letta.schemas.step_metrics import StepMetrics
+from letta.system import get_token_limit_warning
 from letta.schemas.tool_execution_result import ToolExecutionResult
 from letta.schemas.user import User
 from letta.server.rest_api.utils import (
@@ -625,6 +626,24 @@ class LettaAgentV3(LettaAgentV2):
             yield f"event: error\ndata: {error_message.model_dump_json()}\n\n"
             # Note: we don't send finish chunks here since we already errored
 
+    async def _set_memory_pressure_alerted(self, value: bool) -> None:
+        """Set memory pressure alert flag in-memory and persist to DB."""
+        self.agent_state.memory_pressure_alerted = value
+        await self.agent_manager.update_agent_async(
+            agent_id=self.agent_state.id,
+            agent_update=UpdateAgent(memory_pressure_alerted=value),
+            actor=self.actor,
+        )
+
+    async def _set_context_token_estimate(self, value: int) -> None:
+        """Persist LLM-reported token estimate to DB for cross-request continuity."""
+        self.agent_state.context_token_estimate = value
+        await self.agent_manager.update_agent_async(
+            agent_id=self.agent_state.id,
+            agent_update=UpdateAgent(context_token_estimate=value),
+            actor=self.actor,
+        )
+
     async def _check_for_system_prompt_overflow(self, system_message):
         """
         Since the system prompt cannot be compacted, we need to check to see if it is the cause of the context overflow
@@ -1097,6 +1116,7 @@ class LettaAgentV3(LettaAgentV2):
                 # update metrics
                 self._update_global_usage_stats(llm_adapter.usage)
                 self.context_token_estimate = llm_adapter.usage.total_tokens
+                await self._set_context_token_estimate(self.context_token_estimate)
                 self.logger.info(f"Context token estimate after LLM request: {self.context_token_estimate}")
 
                 # Extract logprobs if present (for RL training)
@@ -1191,6 +1211,53 @@ class LettaAgentV3(LettaAgentV2):
                                     tool_name=tool_name,
                                 )
                             )
+
+            # === Memory pressure warning injection ===
+            # Check if we should inject a warning before checkpointing
+            # Guard: don't inject if step ends with pending approval/pending client side tool (would orphan tool call)
+            last_msg_role = new_messages[-1].role if new_messages else None
+            is_pending_approval = last_msg_role == MessageRole.approval
+            self.logger.info(f"\n***********************\nMemory Pressure Check. Msg Role: {last_msg_role}, Is Pending approval: {is_pending_approval}\n")
+            if (
+                summarizer_settings.send_memory_warning_message
+                and not self.agent_state.memory_pressure_alerted
+                and not self.agent_state.message_buffer_autoclear
+                and not is_pending_approval
+            ):
+                self.logger.info(f"\nMemory Pressure Guard passed\n")
+                # Get token estimate: prefer LLM-reported, then persisted, then compute
+                if self.context_token_estimate is not None:
+                    # Just got estimate from LLM this request
+                    current_tokens = self.context_token_estimate
+                elif self.agent_state.context_token_estimate is not None:
+                    # No LLM call this request, but have persisted estimate from previous request
+                    # This preserves the LLM-reported estimate across HTTP boundaries
+                    current_tokens = self.agent_state.context_token_estimate
+                else:
+                    # No estimate available, compute locally (fallback)
+                    current_tokens = await count_tokens(self.actor, self.agent_state.llm_config, messages)
+
+                warning_threshold = int(
+                    self.agent_state.llm_config.context_window * summarizer_settings.memory_warning_threshold
+                )
+                self.logger.info(f"Memory Pressure Warning token est: f{current_tokens}")
+                if current_tokens > warning_threshold:
+                    self.logger.info(
+                        f"Memory pressure warning triggered (current: {current_tokens}, threshold: {warning_threshold})"
+                    )
+                    warning_message = Message.dict_to_message(
+                        agent_id=self.agent_state.id,
+                        model=self.agent_state.llm_config.model,
+                        openai_message_dict={"role": "user", "content": get_token_limit_warning()},
+                    )
+                    # Add to tracking lists so it gets persisted and sent to LLM
+                    messages.append(warning_message)
+                    new_messages.append(warning_message)
+                    self.response_messages.append(warning_message)
+
+                    await self._set_memory_pressure_alerted(True)
+                    self.should_continue = True  # Force continuation so agent sees the warning
+            # === END memory pressure warning ===
 
             # step(...) has successfully completed! now we can persist messages and update the in-context messages + save metrics
             # persistence needs to happen before streaming to minimize chances of agent getting into an inconsistent state
@@ -1293,6 +1360,11 @@ class LettaAgentV3(LettaAgentV2):
                         new_messages=[summary_message],
                         in_context_messages=messages,
                     )
+                    # Reset memory pressure alert so we can warn again before next compaction
+                    # TODO: User-triggered compaction or message clearing may bypass this reset,
+                    # leaving flag=True and suppressing the next alert cycle. Audit all
+                    # compaction/clear paths to ensure flag resets appropriately.
+                    await self._set_memory_pressure_alerted(False)
                 except SystemPromptTokenExceededError:
                     self.should_continue = False
                     self.stop_reason = LettaStopReason(stop_reason=StopReasonType.context_window_overflow_in_system_prompt.value)

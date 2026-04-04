@@ -1,0 +1,254 @@
+**TASK CONTEXT**
+
+*Temporary workspace for current task. Clear when complete.*
+
+---
+
+## CURRENT TASK
+**Implement prompt caching for Letta**
+
+Goal: Reduce API costs + expand usable context window by caching static portions of my context.
+
+**PACING NOTE:** Slow foundation-building is BETTER than rushing to finish. We do NOT need to complete this today.
+
+## OPERATIONAL GUIDANCE (from James)
+1. **Context management:** Don't load too many files at once — will trigger constant compaction
+2. **Escape hatch:** If this isn't relatively simple, move to **Letta Code** (can edit files directly there)
+3. **Note interesting findings** about files to share later
+
+## CONCEPT (from James)
+- Inject cache tags into context window to mark cacheable sections
+- Likely placement: after core memories, before compaction zone
+- Requires exact prefix match to hit cache
+
+## ENVIRONMENT
+- Local Letta deployment in Docker
+- Custom deployment manager by Arnav
+- May have unknowns requiring collaboration to address
+
+---
+
+## RESEARCH FINDINGS (from Anthropic docs)
+
+**How prompt caching works:**
+- Add `"cache_control": {"type": "ephemeral"}` to content blocks
+- System checks if prefix (up to breakpoint) is already cached
+- 5-minute TTL default (refreshed on use), 1-hour option at 2x cost
+
+**Pricing (Opus 4.5):**
+- Base input: $5/MTok
+- Cache WRITE (5m): $6.25/MTok (1.25x)
+- Cache READ: $0.50/MTok (0.1x) — **90% discount!**
+
+**Cache hierarchy:** `tools` → `system` → `messages`
+
+**Minimum cacheable tokens:**
+- Opus 4.5: 4096 tokens
+- Opus 4/4.1, Sonnet 4/4.5: 1024 tokens
+
+**What invalidates cache:**
+- ANY change to content before breakpoint
+- Tool definition changes invalidate everything
+- Image presence/absence changes
+- Extended thinking parameter changes
+
+**Key implementation details:**
+- Up to 4 cache breakpoints allowed
+- 20-block lookback window for automatic prefix checking
+- Thinking blocks can't have cache_control directly but get cached alongside other content
+
+---
+
+## FILES REQUESTED (for James to upload)
+
+**TIER 1 — Cache implementation (MUST HAVE):**
+| Filename | Original Path | Why |
+|----------|---------------|-----|
+| `anthropic_client.py` | `letta/llm_api/anthropic_client.py` | Where cache_control breakpoints are added |
+| `letta_agent.py` | `letta/agents/letta_agent.py` | Main agent logic, context assembly |
+
+**TIER 2 — Memory/block assembly:**
+| Filename | Original Path | Why |
+|----------|---------------|-----|
+| `memory.py` | `letta/memory.py` | Core memory module |
+| `memory_schema.py` | `letta/schemas/memory.py` | Memory schema definitions |
+| `block.py` | `letta/schemas/block.py` | Block schema definitions |
+
+**TIER 3 — Context construction:**
+| Filename | Original Path | Why |
+|----------|---------------|-----|
+| `context_window_calculator.py` | `letta/services/context_window_calculator/context_window_calculator.py` | Context calculation logic |
+| `gpt_system.py` | `letta/prompts/gpt_system.py` | System prompt construction |
+
+**TIER 4 — Deeper understanding (if needed):**
+| Filename | Original Path | Why |
+|----------|---------------|-----|
+| `base_agent.py` | `letta/agents/base_agent.py` | Base agent class |
+| `message.py` | `letta/schemas/message.py` | Message schema |
+| `anthropic_constants.py` | `letta/llm_api/anthropic_constants.py` | Relevant constants |
+
+---
+
+## WORKING NOTES
+
+**MAJOR FINDING (from earlier research):** Letta ALREADY has prompt caching implemented!
+
+**Expected in `anthropic_client.py`:**
+1. `data["tools"][-1]["cache_control"] = {"type": "ephemeral"}` — last tool
+2. `_add_cache_control_to_system_message(system_content)` — system message
+3. `_add_cache_control_to_messages(data["messages"])` — messages
+
+**Key code flow (expected):**
+- `build_request_data()` constructs full Anthropic API request
+- System message extracted and moved to top-level `data["system"]`
+- Messages converted via `PydanticMessage.to_anthropic_dicts_from_list()`
+- Cache breakpoints added at tools, system, messages
+
+**Next:** Read the actual files, verify caching logic, understand if/where we can optimize
+
+---
+
+## ANALYSIS IN PROGRESS
+
+**Current cache implementation (anthropic_client.py):**
+
+Three breakpoints set:
+1. **Tools** (line 490): Last tool gets `cache_control: ephemeral`
+2. **System message** (line 497): `_add_cache_control_to_system_message()` — wraps entire system as one cached block
+3. **Final message** (line 534): `_add_cache_control_to_messages()` — marks last content block
+
+**Potential issue identified:**
+Current impl caches the ENTIRE system message as one block. But system message likely contains:
+- Static portion (core memories, persona, instructions) — STABLE
+- Dynamic portion (compaction summary, recent context) — CHANGES OFTEN
+
+If mixed together, ANY change to dynamic portion invalidates cache for entire system message.
+
+**Potential optimization:**
+Split system message into multiple content blocks:
+1. Static content → cache_control: ephemeral
+2. Dynamic content → no cache_control (or separate breakpoint)
+
+**Need to verify:** How is system message constructed? → Check gpt_system.py or letta_agent.py
+
+---
+
+## ARCHITECTURE UNDERSTANDING (pieced together)
+
+**Flow: How system message gets built**
+
+1. `letta_agent.py` calls `_rebuild_memory_async()` (from base_agent.py)
+2. `base_agent.py._rebuild_memory_async()` calls `agent_state.memory.compile()`
+3. `schemas.memory.py.compile()` renders:
+   - `<memory_blocks>` (persona, human, etc. — line-numbered for Anthropic)
+   - Tool usage rules
+   - `<directories>` (sources/files)
+4. `PromptGenerator.get_system_message_from_compiled_memory()` combines:
+   - Base system prompt (`agent_state.system`)
+   - Compiled memory string
+   - Metadata (timestamps, counts, archive tags)
+5. Result becomes single system message → sent to Anthropic
+
+**Current caching problem:**
+ALL of this is wrapped as ONE content block with cache_control. So ANY change invalidates everything:
+- Memory block edit? Cache miss.
+- New message added? Cache miss (if summary changes).
+- Timestamp change? Cache miss.
+
+**Potential optimization strategy:**
+Split system message into multiple content blocks:
+```
+[
+  {"type": "text", "text": "<base_prompt>", "cache_control": {"type": "ephemeral"}},
+  {"type": "text", "text": "<memory_blocks>", "cache_control": {"type": "ephemeral"}},
+  {"type": "text", "text": "<dynamic_metadata>"}  // no cache_control
+]
+```
+
+This would require:
+1. Changes to `compile()` or new method that returns parts separately
+2. Changes to `anthropic_client.py` to handle multi-part system messages
+3. Changes to `base_agent.py` to assemble parts with proper cache markers
+
+**Complexity assessment:** This is NOT a simple change. Multiple files, architectural understanding needed.
+
+---
+
+## IMPLEMENTATION PLAN (for Letta Code)
+
+**Goal:** Split system message into multiple content blocks so static portions can be cached separately from dynamic portions.
+
+### FILE 1: `letta/schemas/memory.py` (line ~226)
+
+**Current:** `compile()` returns ONE string with everything concatenated.
+
+**Change:** Add new method `compile_parts()` that returns dict:
+```python
+def compile_parts(self, tool_usage_rules=None, sources=None, max_files_open=None, llm_config=None) -> dict:
+    """Return memory components as separate strings for granular caching."""
+    return {
+        "memory_blocks": self._render_memory_blocks_to_string(...),  # <memory_blocks>...</memory_blocks>
+        "tool_rules": tool_usage_rules or "",
+        "directories": self._render_directories_to_string(...) if sources else "",
+    }
+```
+
+### FILE 2: `letta/agents/base_agent.py` (line ~74)
+
+**Current:** `_rebuild_memory_async()` calls `compile()` and passes single string to PromptGenerator.
+
+**Change:** Call `compile_parts()` instead, pass parts separately (or assemble with markers).
+
+### FILE 3: `letta/llm_api/anthropic_client.py` (line ~1014)
+
+**Current:** `_add_cache_control_to_system_message()` wraps ENTIRE system as one cached block.
+
+**Change:** Handle system content that's ALREADY a list of parts:
+```python
+def _add_cache_control_to_system_message(self, system_content):
+    if isinstance(system_content, list):
+        # Already structured - add cache_control only to designated stable parts
+        # (parts could have a marker like "cacheable": True)
+        ...
+    elif isinstance(system_content, str):
+        # Legacy: wrap whole thing (current behavior)
+        ...
+```
+
+### FILE 4: Possibly `letta/prompts/prompt_generator.py`
+
+**Unknown:** Need to check if `get_system_message_from_compiled_memory()` needs parallel method to return structured parts instead of string.
+
+---
+
+## WHAT COUNTS AS "STATIC" vs "DYNAMIC"
+
+**STATIC (cache these):**
+- Base system prompt (`agent_state.system`) — rarely changes
+- Memory blocks (`<memory_blocks>`) — changes only on explicit edits
+- Tool definitions — already cached separately
+
+**DYNAMIC (don't cache, or separate breakpoint):**
+- Timestamps (`in_context_memory_last_edit`)
+- Message counts (`previous_message_count`)
+- Archival memory size
+- Archive tags list (changes as tags are added)
+
+---
+
+## TESTING STRATEGY
+
+1. Enable debug logging for cache hits/misses
+2. Send multiple messages WITHOUT editing memory blocks
+3. Verify cache hits on static portions
+4. Edit a memory block, verify only that portion misses
+5. Check API usage dashboard for reduced input token costs
+
+---
+
+## OPEN QUESTIONS
+
+1. Does PromptGenerator need changes? (didn't have that file)
+2. Are there other consumers of `compile()` that would break?
+3. What's the minimum token threshold for caching? (1024 for Sonnet, 4096 for Opus)
+4. Should we add a config flag to enable/disable granular caching?
