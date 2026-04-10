@@ -1988,7 +1988,8 @@ class LettaAgentV3(LettaAgentV2):
             messages_count_before=messages_count_before,
         )
 
-        # Update the agent's context token estimate
+        # Update the agent's context token estimate and persist for cross-request continuity
         self.context_token_estimate = result.context_token_estimate
+        await self._set_context_token_estimate(self.context_token_estimate)
 
         return result.summary_message, result.compacted_messages, result.summary_text
