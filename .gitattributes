@@ -9,6 +9,7 @@
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.sh text eol=lf
 
 # Declare files that will always have CRLF line endings on checkout.
 # (Only if you have specific Windows-only files)
