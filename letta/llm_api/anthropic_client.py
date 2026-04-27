@@ -67,15 +67,16 @@ class AnthropicClient(LLMClientBase):
         client = self._get_anthropic_client(llm_config, async_client=False)
         betas: list[str] = []
 
-        # Opus 4.6 / Sonnet 4.6 Auto Thinking
+        # Opus 4.6 / Opus 4.7 / Sonnet 4.6 Auto Thinking
         if llm_config.enable_reasoner:
+            # Opus 4.7: adaptive thinking is GA — no beta header needed (uses client.messages, not client.beta.messages)
             if llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-sonnet-4-6"):
                 betas.append("adaptive-thinking-2026-01-28")
             # Interleaved thinking for other reasoners (sync path parity)
             else:
                 betas.append("interleaved-thinking-2025-05-14")
 
-        # 1M context beta for Sonnet 4/4.5 or Opus 4.6 when enabled
+        # 1M context beta for Sonnet 4/4.5 or Opus 4.6/4.7 when enabled
         try:
             from letta.settings import model_settings
 
@@ -83,21 +84,24 @@ class AnthropicClient(LLMClientBase):
                 llm_config.model.startswith("claude-sonnet-4") or llm_config.model.startswith("claude-sonnet-4-5")
             ):
                 betas.append("context-1m-2025-08-07")
-            elif model_settings.anthropic_opus_1m and llm_config.model.startswith("claude-opus-4-6"):
+            elif model_settings.anthropic_opus_1m and (
+                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-opus-4-7")
+            ):
                 betas.append("context-1m-2025-08-07")
         except Exception:
             pass
 
-        # Effort parameter for Opus 4.5, Opus 4.6, and Sonnet 4.6 - to extend to other models, modify the model check
+        # Effort parameter for Opus 4.5, Opus 4.6, Opus 4.7, and Sonnet 4.6 - to extend to other models, modify the model check
         if (
             llm_config.model.startswith("claude-opus-4-5")
             or llm_config.model.startswith("claude-opus-4-6")
+            or llm_config.model.startswith("claude-opus-4-7")
             or llm_config.model.startswith("claude-sonnet-4-6")
         ) and llm_config.effort is not None:
             betas.append("effort-2025-11-24")
-            # Max effort beta for Opus 4.6 / Sonnet 4.6
+            # Max effort beta for Opus 4.6 / Opus 4.7 / Sonnet 4.6
             if (
-                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-sonnet-4-6")
+                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-opus-4-7") or llm_config.model.startswith("claude-sonnet-4-6")
             ) and llm_config.effort == "max":
                 betas.append("max-effort-2026-01-24")
 
@@ -140,15 +144,16 @@ class AnthropicClient(LLMClientBase):
         client = await self._get_anthropic_client_async(llm_config, async_client=True)
         betas: list[str] = []
 
-        # Opus 4.6 / Sonnet 4.6 Auto Thinking
+        # Opus 4.6 / Opus 4.7 / Sonnet 4.6 Auto Thinking
         if llm_config.enable_reasoner:
+            # Opus 4.7: adaptive thinking is GA — no beta header needed (uses client.messages, not client.beta.messages)
             if llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-sonnet-4-6"):
                 betas.append("adaptive-thinking-2026-01-28")
             # Interleaved thinking for other reasoners (sync path parity)
             else:
                 betas.append("interleaved-thinking-2025-05-14")
 
-        # 1M context beta for Sonnet 4/4.5 or Opus 4.6 when enabled
+        # 1M context beta for Sonnet 4/4.5 or Opus 4.6/4.7 when enabled
         try:
             from letta.settings import model_settings
 
@@ -156,21 +161,24 @@ class AnthropicClient(LLMClientBase):
                 llm_config.model.startswith("claude-sonnet-4") or llm_config.model.startswith("claude-sonnet-4-5")
             ):
                 betas.append("context-1m-2025-08-07")
-            elif model_settings.anthropic_opus_1m and llm_config.model.startswith("claude-opus-4-6"):
+            elif model_settings.anthropic_opus_1m and (
+                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-opus-4-7")
+            ):
                 betas.append("context-1m-2025-08-07")
         except Exception:
             pass
 
-        # Effort parameter for Opus 4.5, Opus 4.6, and Sonnet 4.6 - to extend to other models, modify the model check
+        # Effort parameter for Opus 4.5, Opus 4.6, Opus 4.7, and Sonnet 4.6 - to extend to other models, modify the model check
         if (
             llm_config.model.startswith("claude-opus-4-5")
             or llm_config.model.startswith("claude-opus-4-6")
+            or llm_config.model.startswith("claude-opus-4-7")
             or llm_config.model.startswith("claude-sonnet-4-6")
         ) and llm_config.effort is not None:
             betas.append("effort-2025-11-24")
-            # Max effort beta for Opus 4.6 / Sonnet 4.6
+            # Max effort beta for Opus 4.6 / Opus 4.7 / Sonnet 4.6
             if (
-                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-sonnet-4-6")
+                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-opus-4-7") or llm_config.model.startswith("claude-sonnet-4-6")
             ) and llm_config.effort == "max":
                 betas.append("max-effort-2026-01-24")
 
@@ -321,15 +329,16 @@ class AnthropicClient(LLMClientBase):
         # See: https://docs.anthropic.com/en/docs/build-with-claude/tool-use/fine-grained-streaming
         betas = ["fine-grained-tool-streaming-2025-05-14"]
 
-        # Opus 4.6 / Sonnet 4.6 Auto Thinking
+        # Opus 4.6 / Opus 4.7 / Sonnet 4.6 Auto Thinking
         if llm_config.enable_reasoner:
+            # Opus 4.7: adaptive thinking is GA — no beta header needed (uses client.messages, not client.beta.messages)
             if llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-sonnet-4-6"):
                 betas.append("adaptive-thinking-2026-01-28")
             # Interleaved thinking for other reasoners (sync path parity)
             else:
                 betas.append("interleaved-thinking-2025-05-14")
 
-        # 1M context beta for Sonnet 4/4.5 or Opus 4.6 when enabled
+        # 1M context beta for Sonnet 4/4.5 or Opus 4.6/4.7 when enabled
         try:
             from letta.settings import model_settings
 
@@ -337,21 +346,24 @@ class AnthropicClient(LLMClientBase):
                 llm_config.model.startswith("claude-sonnet-4") or llm_config.model.startswith("claude-sonnet-4-5")
             ):
                 betas.append("context-1m-2025-08-07")
-            elif model_settings.anthropic_opus_1m and llm_config.model.startswith("claude-opus-4-6"):
+            elif model_settings.anthropic_opus_1m and (
+                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-opus-4-7")
+            ):
                 betas.append("context-1m-2025-08-07")
         except Exception:
             pass
 
-        # Effort parameter for Opus 4.5, Opus 4.6, and Sonnet 4.6 - to extend to other models, modify the model check
+        # Effort parameter for Opus 4.5, Opus 4.6, Opus 4.7, and Sonnet 4.6 - to extend to other models, modify the model check
         if (
             llm_config.model.startswith("claude-opus-4-5")
             or llm_config.model.startswith("claude-opus-4-6")
+            or llm_config.model.startswith("claude-opus-4-7")
             or llm_config.model.startswith("claude-sonnet-4-6")
         ) and llm_config.effort is not None:
             betas.append("effort-2025-11-24")
-            # Max effort beta for Opus 4.6 / Sonnet 4.6
+            # Max effort beta for Opus 4.6 / Opus 4.7 / Sonnet 4.6
             if (
-                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-sonnet-4-6")
+                llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-opus-4-7") or llm_config.model.startswith("claude-sonnet-4-6")
             ) and llm_config.effort == "max":
                 betas.append("max-effort-2026-01-24")
 
@@ -542,8 +554,8 @@ class AnthropicClient(LLMClientBase):
         )
 
         if should_enable_thinking:
-            # Opus 4.6 / Sonnet 4.6 uses Auto Thinking (no budget tokens)
-            if llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-sonnet-4-6"):
+            # Opus 4.6 / Opus 4.7 / Sonnet 4.6 uses Auto Thinking (no budget tokens)
+            if llm_config.model.startswith("claude-opus-4-6") or llm_config.model.startswith("claude-opus-4-7") or llm_config.model.startswith("claude-sonnet-4-6"):
                 data["thinking"] = {
                     "type": "adaptive",
                 }
@@ -559,14 +571,19 @@ class AnthropicClient(LLMClientBase):
                     "budget_tokens": thinking_budget,
                 }
             # `temperature` may only be set to 1 when thinking is enabled. Please consult our documentation at https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking'
-            data["temperature"] = 1.0
+            # Opus 4.7 rejects non-default temperature values — omit it entirely
+            if not llm_config.model.startswith("claude-opus-4-7"):
+                data["temperature"] = 1.0
 
             # Silently disable prefix_fill for now
             prefix_fill = False
 
-        # Effort configuration for Opus 4.5, Opus 4.6, and Sonnet 4.6 (controls token spending)
+        # Effort configuration for Opus 4.5, Opus 4.6, Opus 4.7, and Sonnet 4.6 (controls token spending)
         # To extend to other models, modify the model check
-        if (
+        # NOTE: Opus 4.7 effort hardcoded to "max" for debugging — reasoning not activating otherwise
+        if llm_config.model.startswith("claude-opus-4-7"):
+            data["output_config"] = {"effort": "max"}
+        elif (
             llm_config.model.startswith("claude-opus-4-5")
             or llm_config.model.startswith("claude-opus-4-6")
             or llm_config.model.startswith("claude-sonnet-4-6")
@@ -909,7 +926,9 @@ class AnthropicClient(LLMClientBase):
                     and (model.startswith("claude-sonnet-4") or model.startswith("claude-sonnet-4-5"))
                 ):
                     betas.append("context-1m-2025-08-07")
-                elif model and model_settings.anthropic_opus_1m and model.startswith("claude-opus-4-6"):
+                elif model and model_settings.anthropic_opus_1m and (
+                    model.startswith("claude-opus-4-6") or model.startswith("claude-opus-4-7")
+                ):
                     betas.append("context-1m-2025-08-07")
             except Exception:
                 pass
