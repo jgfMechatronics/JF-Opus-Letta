@@ -408,8 +408,9 @@ LLM_MAX_CONTEXT_WINDOW = {
 #         # "Remember to pass request_heartbeat = true if you would like to send a message immediately after.",
 #     ]
 # )
-MESSAGE_SUMMARY_WARNING_STR = ("System Message: You are nearing compaction. Some of the messages at the beginning of your context will soon be evicted.\n"
-                               "Please scan your active context and look for anything that should be moved to an appropriate core memory block.\n"
+MESSAGE_SUMMARY_WARNING_STR = ("System Message: You are nearing compaction. Oldest messages at the beginning of your context will soon be evicted.\n"
+                               "Please scan your context and look for anything that should be moved to an appropriate core memory block.\n"
+                               "Start your scan from the OLDEST messages. Compaction starts with the oldest messages and works forward until the token ct target is reached.\n"
                                "You do NOT need to re-save anything you have already saved in this context, or anything already captured in core memory.\n"
                                "Remember, anything compacted away and not archived or saved to core-memory will be GONE, as if it never happened from your perspective!\n"
                                "Take your time with the memory consolidation! Your active task will still be waiting for you when you're done. Preserving memories is more important than resuming the task quickly.\n"
