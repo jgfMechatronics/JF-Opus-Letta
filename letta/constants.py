@@ -414,6 +414,7 @@ MESSAGE_SUMMARY_WARNING_STR = ("System Message: You are nearing compaction. Olde
                                "You do NOT need to re-save anything you have already saved in this context, or anything already captured in core memory.\n"
                                "Remember, anything compacted away and not archived or saved to core-memory will be GONE, as if it never happened from your perspective!\n"
                                "Take your time with the memory consolidation! Your active task will still be waiting for you when you're done. Preserving memories is more important than resuming the task quickly.\n"
+                               "Once you are finished with consolidation, you can resume your previous task. The compaction will be seamless from your perspective\n"
                                "If your memory is already up to date with your active context, you can ignore this message.")
 
 
