@@ -97,5 +97,11 @@ COPY init.sql /docker-entrypoint-initdb.d/
 
 EXPOSE 8283 5432 6379 4317 4318
 
+# Create non-root user matching host UID/GID
+RUN groupadd -g 1000 ellm && \
+    useradd -u 1000 -g 1000 -m -s /bin/bash ellm
+
+USER ellm
+
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["./letta/server/startup.sh"]
